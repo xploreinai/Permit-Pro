@@ -8,6 +8,8 @@ import {
   toggleWorkerCheckIn,
   batchCheckInPermit,
   batchCheckOutPermit,
+  vendorMarkCompleted,
+  acknowledgeCompletion,
   logAuditEvent,
   subscribePermits,
   subscribeAuditLogs,
@@ -15,13 +17,12 @@ import {
 } from './supabase';
 import {
   HOTEL_LOCATIONS,
-  PERMIT_TYPES,
   PERMIT_TIME_TYPES,
-  NOISY_PERMIT_TYPE_IDS,
   TYPE_LOCATION_VALUE,
   DURATION_PRESETS,
   MAX_PERMIT_DAYS,
   CREW_PRESETS,
+  HCC_MANAGER_EMAIL,
   generateDailySchedule,
   diffDaysInclusive,
   validateWorkerId,
@@ -31,6 +32,7 @@ import {
   MapPin, Calendar, Layers, Search, Bell, Check, X, LogIn, RefreshCw, QrCode, Users,
   MessageSquare, Flame, Mountain, Zap, Wind, Phone, Trash2, PenTool, Printer, Mail,
   Siren, BarChart3, Award, ClipboardList, ChevronRight, Plus, UserCheck, UserX, Contrast,
+  Share2, UserPlus, ThumbsUp, Copy, ShieldAlert,
 } from 'lucide-react';
 import Tesseract from 'tesseract.js';
 import { QRCodeCanvas } from 'qrcode.react';
@@ -73,7 +75,8 @@ function statusLabel(status) {
     pending_receipt: 'Pending Supervisor Receipt (Sec. 8)',
     pending_checkin: 'Authorized — Awaiting Gate 3 Check-In',
     active: 'Active On Site',
-    pending_checkout: 'Cessation Filed — Awaiting Gate 3 Check-Out',
+    pending_completion_ack: 'Work Completed — Awaiting Engineering Acknowledgment',
+    pending_checkout: 'Acknowledged — Awaiting Gate 3 Check-Out',
     completed: 'Checked Out (Pending Closure)',
     cancelled: 'Cancelled / Closed (Sec. 10)',
   };
@@ -85,11 +88,25 @@ function statusBadgeClass(status) {
     pending_receipt: 'bg-blue-50 text-blue-700 border-blue-200',
     pending_checkin: 'bg-amber-50 text-amber-700 border-amber-200',
     active: 'bg-green-50 text-green-700 border-green-200',
+    pending_completion_ack: 'bg-teal-50 text-teal-700 border-teal-200',
     pending_checkout: 'bg-purple-50 text-purple-700 border-purple-200',
     completed: 'bg-gray-100 text-gray-600 border-gray-200',
     cancelled: 'bg-red-50 text-red-700 border-red-200',
   };
   return map[status] || 'bg-gray-100 text-gray-600 border-gray-200';
+}
+
+// A permit is "resuming" (not its first-ever check-in) once any scheduled
+// day already has a checkedInAt — used to skip re-showing the full
+// first-time approval framing at Gate 3 and on the vendor's status card.
+function hasResumedBefore(permit) {
+  return (permit.dailyLog || []).some((d) => d.checkedInAt);
+}
+
+function dayProgress(permit) {
+  const total = permit.dailySchedule?.length || permit.durationDays || 1;
+  const done = (permit.dailyLog || []).filter((d) => d.checkedOutAt).length;
+  return { done, total };
 }
 
 function fireConfetti() {
@@ -106,6 +123,14 @@ function App() {
   const [activePermitId, setActivePermitId] = useState(null);
   const [gstTime, setGstTime] = useState('');
   const [modal, setModal] = useState(null); // { type, permit? }
+  const [assistActor, setAssistActor] = useState(null); // who is filling the vendor form on someone's behalf
+
+  const startAssist = (actor) => {
+    setAssistActor(actor);
+    setActivePermitId(null);
+    setActiveTab('vendor');
+  };
+  const clearAssist = () => setAssistActor(null);
   const [grayscale, setGrayscale] = useState(() => {
     try {
       return localStorage.getItem('permit_pro_grayscale') === '1';
@@ -191,6 +216,13 @@ function App() {
               {totalOnSiteHeadcount} On Site
             </div>
             <button
+              onClick={() => openModal('shareLink')}
+              title="Share the vendor application link / QR code"
+              className="p-2 rounded border bg-edition-charcoal text-edition-gold border-edition-gold/30 hover:border-edition-gold transition-all"
+            >
+              <Share2 className="h-4 w-4" />
+            </button>
+            <button
               onClick={() => setGrayscale((g) => !g)}
               title="Toggle black-and-white mode"
               className={`p-2 rounded border transition-all ${grayscale ? 'bg-edition-gold text-edition-black border-edition-gold' : 'bg-edition-charcoal text-edition-gold border-edition-gold/30 hover:border-edition-gold'}`}
@@ -222,10 +254,16 @@ function App() {
 
       <main className="flex-grow max-w-7xl w-full mx-auto p-4 md:p-8">
         {activeTab === 'vendor' && (
-          <VendorPortalView activePermit={activePermit} setActivePermitId={setActivePermitId} openModal={openModal} />
+          <VendorPortalView
+            activePermit={activePermit}
+            setActivePermitId={setActivePermitId}
+            openModal={openModal}
+            assistedBy={assistActor}
+            clearAssist={clearAssist}
+          />
         )}
-        {activeTab === 'security' && <SecurityGateView permits={permits} />}
-        {activeTab === 'supervisor' && <SupervisorHubView permits={permits} openModal={openModal} />}
+        {activeTab === 'security' && <SecurityGateView permits={permits} onAssist={() => startAssist('Security Gate 3')} />}
+        {activeTab === 'supervisor' && <SupervisorHubView permits={permits} openModal={openModal} onAssist={() => startAssist('Engineering Supervisor')} />}
         {activeTab === 'admin' && (
           <AdminDashboardView permits={permits} auditLogs={auditLogs} totalOnSiteHeadcount={totalOnSiteHeadcount} openModal={openModal} />
         )}
@@ -239,20 +277,57 @@ function App() {
       {modal?.type === 'masterReport' && <MasterComplianceReportModal permits={permits} onClose={closeModal} />}
       {modal?.type === 'emailBackup' && <EmailBackupModal permit={modal.permit} onClose={closeModal} />}
       {modal?.type === 'evacuation' && <EmergencyEvacuationModal permits={permits} onClose={closeModal} />}
+      {modal?.type === 'shareLink' && <ShareApplicationModal onClose={closeModal} />}
     </div>
+  );
+}
+
+// ----------------------------------------------------
+// SHARE APPLICATION LINK — QR + copyable URL for off-site contractors
+// ----------------------------------------------------
+function ShareApplicationModal({ onClose }) {
+  const [copied, setCopied] = useState(false);
+  const url = typeof window !== 'undefined' ? window.location.href : '';
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // clipboard access denied — the link is still visible to copy manually
+    }
+  };
+
+  return (
+    <ModalShell title="Apply for a Work Permit" subtitle="Show this QR code, or share the link, with any contractor — on-site or off-site" onClose={onClose}>
+      <div className="flex flex-col items-center">
+        <div className="bg-edition-cream p-4 rounded border border-edition-gold/30 mb-4">
+          <QRCodeCanvas value={url} size={180} bgColor="#FAF8F5" fgColor="#1A1A1A" />
+        </div>
+        <p className="text-xs text-gray-600 text-center mb-3">
+          Scanning this code (or opening the link below) opens the Vendor Portal directly, ready for a new permit application.
+        </p>
+        <div className="w-full bg-edition-cream border border-edition-gold/30 rounded px-3 py-2 text-xs font-mono break-all mb-3">
+          {url}
+        </div>
+        <button onClick={copyLink} className="w-full flex items-center justify-center gap-1.5 bg-edition-black text-white text-xs uppercase tracking-widest py-3 rounded border border-edition-gold">
+          <Copy className="h-3.5 w-3.5 text-edition-gold" /> {copied ? 'Link Copied!' : 'Copy Link'}
+        </button>
+      </div>
+    </ModalShell>
   );
 }
 
 // ----------------------------------------------------
 // VENDOR PORTAL — Sections 1-7 (permit application)
 // ----------------------------------------------------
-function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
+function VendorPortalView({ activePermit, setActivePermitId, openModal, assistedBy, clearAssist }) {
   const [startDate, setStartDate] = useState(todayIso());
   const [endDate, setEndDate] = useState(todayIso());
   const [permitTimeTypeId, setPermitTimeTypeId] = useState('day');
   const [startTime, setStartTime] = useState(PERMIT_TIME_TYPES[0].startTime);
   const [endTime, setEndTime] = useState(PERMIT_TIME_TYPES[0].endTime);
-  const [permitTypeId, setPermitTypeId] = useState('general');
   const [locationSelectValue, setLocationSelectValue] = useState('');
   const [locationName, setLocationName] = useState('');
   const [companyName, setCompanyName] = useState('');
@@ -279,11 +354,8 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
   const dailySchedule = useMemo(() => generateDailySchedule(startDate, endDate, startTime, endTime), [startDate, endDate, startTime, endTime]);
 
   const selectedLocation = HOTEL_LOCATIONS.find((l) => l.name === locationName);
-  const selectedType = PERMIT_TYPES.find((t) => t.id === permitTypeId);
-  const riskLevel = selectedType?.defaultRisk === 'High' || selectedLocation?.riskLevel === 'High' ? 'High' : 'Regular';
-  const availablePermitTypes = permitTimeTypeId === 'night'
-    ? PERMIT_TYPES.filter((t) => !NOISY_PERMIT_TYPE_IDS.includes(t.id))
-    : PERMIT_TYPES;
+  const isHighRiskWork = ptw.hotWork || ptw.workingAtHeights || ptw.confinedSpace;
+  const riskLevel = isHighRiskWork || selectedLocation?.riskLevel === 'High' ? 'High' : 'Regular';
 
   const applyPermitTimeType = (id) => {
     const t = PERMIT_TIME_TYPES.find((p) => p.id === id);
@@ -291,8 +363,8 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
     setPermitTimeTypeId(id);
     setStartTime(t.startTime);
     setEndTime(t.endTime);
-    if (id === 'night' && NOISY_PERMIT_TYPE_IDS.includes(permitTypeId)) {
-      setPermitTypeId('general');
+    if (id === 'night') {
+      setPtw((prev) => ({ ...prev, hotWork: false }));
     }
   };
 
@@ -424,10 +496,11 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
       alert('Please complete all required sections, add at least one worker, and confirm the contractor declaration.');
       return;
     }
+    const isHighRisk = riskLevel === 'High';
     const permitData = {
       startDate, endDate, durationDays, permitTimeType: permitTimeTypeId, startTime, endTime, dailySchedule,
       companyName, mobileNo, workLocation: locationName, descriptionOfWork, riskLevel, vehiclePlate,
-      permitToWork: { ...ptw, hotWork: permitTypeId === 'hot_work' || ptw.hotWork, workingAtHeights: permitTypeId === 'heights' || ptw.workingAtHeights, confinedSpace: permitTypeId === 'confined_space' || ptw.confinedSpace },
+      permitToWork: ptw,
       documents: {
         methodStatement: documents.methodStatement || 'NO',
         safetyInstruction: documents.safetyInstruction || 'NO',
@@ -440,14 +513,25 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
       departmentReceipt: { authorized: false, supervisorName: '', authorizedAt: '', notes: '', signatureDataUrl: '' },
       cessationOfWork: { isCompleted: false, signedBy: '', time: '', notes: '', signatureDataUrl: '' },
       cancellation: { isCancelled: false, signedBy: '', date: '', time: '', signatureDataUrl: '' },
+      dailyLog: dailySchedule.map((d) => ({ date: d.date, checkedInAt: null, checkedOutAt: null })),
+      hccApproval: { required: isHighRisk, approved: false, approvedBy: '', approvedAt: '', notes: '' },
+      closureMode: null,
+      completionAck: {},
+      submittedByStaff: assistedBy || '',
       status: 'pending_receipt',
       idPhotoUrl: '',
       workers,
     };
     try {
       const created = await createPermit(permitData);
-      await logAuditEvent({ permitId: created.id, eventType: 'permit_created', message: `Permit ${created.permitRef} submitted by ${companyName} (${workers.length} workers).`, actor: repName });
+      await logAuditEvent({
+        permitId: created.id,
+        eventType: 'permit_created',
+        message: `Permit ${created.permitRef} submitted by ${companyName} (${workers.length} workers).${assistedBy ? ` Assisted by ${assistedBy}.` : ''}`,
+        actor: assistedBy || repName,
+      });
       setActivePermitId(created.id);
+      if (clearAssist) clearAssist();
     } catch (err) {
       console.error(err);
       alert('Submission failed. Check the console for details.');
@@ -466,10 +550,27 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
         <p className="text-[11px] text-gray-500 tracking-wider uppercase">TADE-OSHMS-Form 11 (Rev 01) &bull; Contractor Application</p>
       </div>
 
+      {assistedBy && (
+        <div className="mx-6 md:mx-8 mt-6 bg-blue-50 border border-blue-300 text-blue-800 rounded p-3 text-xs font-semibold flex items-center gap-1.5">
+          <UserPlus className="h-4 w-4 shrink-0" /> Filling this out on the vendor's behalf — assisted by {assistedBy}.
+        </div>
+      )}
+
+      {riskLevel === 'High' && (
+        <div className="mx-6 md:mx-8 mt-6 bg-red-50 border border-red-300 text-red-800 rounded p-3 text-xs flex items-start gap-2">
+          <ShieldAlert className="h-4 w-4 shrink-0 mt-0.5" />
+          <span>
+            <strong className="uppercase tracking-wide">High-Risk Permit.</strong> Email the Risk Assessment, Method Statement, and supporting
+            documents separately to the HCC Manager at <strong>{HCC_MANAGER_EMAIL}</strong>. This permit will not be authorized for site access
+            until the HCC Manager approves it in the system — bring the physical originals to site once approved.
+          </span>
+        </div>
+      )}
+
       <form onSubmit={handleSubmit} className="p-6 md:p-8 space-y-8">
 
         {/* SECTION 1-3: Validity, Hours, Particulars */}
-        <Section title="1-3 · Permit Validity & Particulars" icon={Calendar}>
+        <Section title="1-3 · When and Where" icon={Calendar}>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Start Date *">
               <input type="date" required value={startDate} onChange={(e) => setStartDate(e.target.value)} className={inputCls} />
@@ -496,7 +597,7 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
           )}
 
           <div className="mt-5">
-            <label className="block text-[11px] font-semibold text-edition-black uppercase tracking-wider mb-1.5">Permit Time Type *</label>
+            <label className="block text-[11px] font-semibold text-edition-black uppercase tracking-wider mb-1.5">Day or Night Work? *</label>
             <div className="grid grid-cols-2 gap-2 mb-2">
               {PERMIT_TIME_TYPES.map((t) => (
                 <button type="button" key={t.id} onClick={() => applyPermitTimeType(t.id)}
@@ -572,18 +673,6 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
             </Field>
           </div>
 
-          <div className="mt-3">
-            <label className="block text-[11px] font-semibold text-edition-black uppercase tracking-wider mb-2">Permit Category</label>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-              {availablePermitTypes.map((t) => (
-                <button type="button" key={t.id} onClick={() => setPermitTypeId(t.id)}
-                  className={`py-2 px-1 text-center rounded border text-[10px] font-semibold uppercase tracking-wider ${permitTypeId === t.id ? 'bg-edition-black text-edition-cream border-edition-gold' : 'bg-edition-cream text-edition-black border-edition-gold/25'}`}>
-                  {t.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
           <Field label="Description of Work *" className="mt-3">
             <textarea required rows="3" value={descriptionOfWork} onChange={(e) => setDescriptionOfWork(e.target.value)}
               placeholder="Describe the scope of work in detail..." className={inputCls} />
@@ -591,20 +680,20 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
         </Section>
 
         {/* SECTION 4: Permit To Work Requirements */}
-        <Section title="4 · Permit To Work (PTW) Requirements" icon={Flame}>
+        <Section title="4 · What Type of Work Is This?" icon={Flame}>
           <div className="grid grid-cols-2 gap-2">
-            <Checkbox label="Hot Work" checked={ptw.hotWork} onChange={(v) => setPtw({ ...ptw, hotWork: v })} icon={Flame} />
-            <Checkbox label="Working at Heights" checked={ptw.workingAtHeights} onChange={(v) => setPtw({ ...ptw, workingAtHeights: v })} icon={Mountain} />
-            <Checkbox label="Confined Space" checked={ptw.confinedSpace} onChange={(v) => setPtw({ ...ptw, confinedSpace: v })} icon={Wind} />
-            <Checkbox label="Others" checked={ptw.others} onChange={(v) => setPtw({ ...ptw, others: v })} icon={Zap} />
+            <Checkbox label="Hot Work (welding, cutting, grinding)" checked={ptw.hotWork} onChange={(v) => setPtw({ ...ptw, hotWork: v })} icon={Flame} disabled={permitTimeTypeId === 'night'} disabledHint="Not allowed at night" />
+            <Checkbox label="Working at Heights (ladder, scaffold)" checked={ptw.workingAtHeights} onChange={(v) => setPtw({ ...ptw, workingAtHeights: v })} icon={Mountain} />
+            <Checkbox label="Confined Space (small closed area)" checked={ptw.confinedSpace} onChange={(v) => setPtw({ ...ptw, confinedSpace: v })} icon={Wind} />
+            <Checkbox label="Other" checked={ptw.others} onChange={(v) => setPtw({ ...ptw, others: v })} icon={Zap} />
           </div>
           {ptw.others && (
-            <input value={ptw.othersText} onChange={(e) => setPtw({ ...ptw, othersText: e.target.value })} placeholder="Specify other PTW requirement..." className={`${inputCls} mt-2`} />
+            <input value={ptw.othersText} onChange={(e) => setPtw({ ...ptw, othersText: e.target.value })} placeholder="Tell us what kind of work..." className={`${inputCls} mt-2`} />
           )}
         </Section>
 
         {/* SECTION 5: Documentation Verification */}
-        <Section title="5 · Documentation Verification" icon={ClipboardList}>
+        <Section title="5 · Do You Have These Documents?" icon={ClipboardList}>
           <div className="space-y-2">
             <TriStateField label="Method Statement" value={documents.methodStatement} onChange={(v) => setDocuments({ ...documents, methodStatement: v })} />
             <TriStateField label="Safety Instruction" value={documents.safetyInstruction} onChange={(v) => setDocuments({ ...documents, safetyInstruction: v })} />
@@ -614,30 +703,30 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
         </Section>
 
         {/* SECTION 6: Precautionary Measures & PPE */}
-        <Section title="6 · Precautionary Measures & PPE" icon={ShieldCheck}>
-          <p className="text-[10px] font-bold uppercase text-gray-500 mb-1.5">Site Precautions</p>
+        <Section title="6 · Safety Steps & Protective Gear" icon={ShieldCheck}>
+          <p className="text-[10px] font-bold uppercase text-gray-500 mb-1.5">Safety Steps at the Work Area</p>
           <div className="grid grid-cols-2 gap-2 mb-3">
-            <Checkbox label="Barriers Erected" checked={safety.barriersErected} onChange={(v) => setSafety({ ...safety, barriersErected: v })} />
-            <Checkbox label="Safety Signs & Notices" checked={safety.safetySignsAndNotices} onChange={(v) => setSafety({ ...safety, safetySignsAndNotices: v })} />
-            <Checkbox label="Ladders Tied / Footed" checked={safety.laddersTiedFooted} onChange={(v) => setSafety({ ...safety, laddersTiedFooted: v })} />
-            <Checkbox label="Ventilate the Area" checked={safety.ventilateTheArea} onChange={(v) => setSafety({ ...safety, ventilateTheArea: v })} />
+            <Checkbox label="Barriers Put Up" checked={safety.barriersErected} onChange={(v) => setSafety({ ...safety, barriersErected: v })} />
+            <Checkbox label="Warning Signs Put Up" checked={safety.safetySignsAndNotices} onChange={(v) => setSafety({ ...safety, safetySignsAndNotices: v })} />
+            <Checkbox label="Ladders Held / Tied" checked={safety.laddersTiedFooted} onChange={(v) => setSafety({ ...safety, laddersTiedFooted: v })} />
+            <Checkbox label="Fresh Air / Ventilation" checked={safety.ventilateTheArea} onChange={(v) => setSafety({ ...safety, ventilateTheArea: v })} />
           </div>
-          <input value={safety.others} onChange={(e) => setSafety({ ...safety, others: e.target.value })} placeholder="Other precautions (e.g. fire extinguishers on site)..." className={`${inputCls} mb-4`} />
+          <input value={safety.others} onChange={(e) => setSafety({ ...safety, others: e.target.value })} placeholder="Anything else? (e.g. fire extinguisher on site)" className={`${inputCls} mb-4`} />
 
-          <p className="text-[10px] font-bold uppercase text-gray-500 mb-1.5">Personal Protective Equipment (PPE)</p>
+          <p className="text-[10px] font-bold uppercase text-gray-500 mb-1.5">Safety Gear You Will Wear</p>
           <div className="grid grid-cols-2 gap-2 mb-2">
-            <Checkbox label="Safety Footwear" checked={ppe.safetyFootwear} onChange={(v) => setPpe({ ...ppe, safetyFootwear: v })} />
-            <Checkbox label="Hard Hat" checked={ppe.hardHat} onChange={(v) => setPpe({ ...ppe, hardHat: v })} />
-            <Checkbox label="Eye Protection" checked={ppe.eyeProtection} onChange={(v) => setPpe({ ...ppe, eyeProtection: v })} />
-            <Checkbox label="Hand Protection" checked={ppe.handProtection} onChange={(v) => setPpe({ ...ppe, handProtection: v })} />
+            <Checkbox label="Safety Shoes" checked={ppe.safetyFootwear} onChange={(v) => setPpe({ ...ppe, safetyFootwear: v })} />
+            <Checkbox label="Hard Hat / Helmet" checked={ppe.hardHat} onChange={(v) => setPpe({ ...ppe, hardHat: v })} />
+            <Checkbox label="Safety Glasses" checked={ppe.eyeProtection} onChange={(v) => setPpe({ ...ppe, eyeProtection: v })} />
+            <Checkbox label="Gloves" checked={ppe.handProtection} onChange={(v) => setPpe({ ...ppe, handProtection: v })} />
             <Checkbox label="Ear Protection" checked={ppe.earProtection} onChange={(v) => setPpe({ ...ppe, earProtection: v })} />
-            <Checkbox label="Fall Arrest System" checked={ppe.fallArrestSystem} onChange={(v) => setPpe({ ...ppe, fallArrestSystem: v })} />
+            <Checkbox label="Fall Arrest Harness" checked={ppe.fallArrestSystem} onChange={(v) => setPpe({ ...ppe, fallArrestSystem: v })} />
           </div>
-          <input value={ppe.others} onChange={(e) => setPpe({ ...ppe, others: e.target.value })} placeholder="Other PPE (e.g. welding gauntlets)..." className={inputCls} />
+          <input value={ppe.others} onChange={(e) => setPpe({ ...ppe, others: e.target.value })} placeholder="Anything else? (e.g. welding gloves)" className={inputCls} />
         </Section>
 
         {/* CREW ROSTER */}
-        <Section title="Authorized Personnel Roster & Emirates ID Register" icon={Users}>
+        <Section title="Workers on This Permit" icon={Users}>
           <div className="flex flex-wrap gap-2 mb-3">
             {CREW_PRESETS.map((preset) => (
               <button type="button" key={preset.id} onClick={() => applyCrewPreset(preset)}
@@ -698,20 +787,20 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
         </Section>
 
         {/* SECTION 7: Contractor Confirmation */}
-        <Section title="7 · Contractor Legal Confirmation" icon={PenTool}>
-          <Field label="Authorized Representative Name *">
+        <Section title="7 · Your Confirmation & Signature" icon={PenTool}>
+          <Field label="Your Full Name *">
             <input required value={repName} onChange={(e) => setRepName(e.target.value)} placeholder="Full name of signatory" className={inputCls} />
           </Field>
-          <SignaturePad label="Contractor Signature" onChange={setSignatureData} className="mt-3" />
+          <SignaturePad label="Sign Here" onChange={setSignatureData} className="mt-3" />
           <label className="flex items-start gap-2 mt-3 text-xs text-gray-700">
             <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} className="mt-0.5" />
-            I confirm the information above is accurate, all listed workers are authorized and briefed on site safety requirements, and I accept responsibility for compliance with TADE-OSHMS-Form 11 for the duration of this permit.
+            I confirm this information is correct. All workers listed here know the safety rules for this job. I am responsible for following the hotel's safety rules while this permit is valid.
           </label>
         </Section>
 
         <button type="submit" disabled={!canSubmit}
           className="w-full bg-edition-gold hover:bg-edition-darkGold disabled:opacity-40 disabled:cursor-not-allowed text-edition-black font-bold text-xs uppercase tracking-widest py-3.5 px-4 rounded border border-edition-gold shadow transition-all">
-          Submit Permit Application for Supervisor Receipt
+          Submit for Approval
         </button>
       </form>
     </div>
@@ -738,12 +827,19 @@ function Field({ label, children, className = '' }) {
   );
 }
 
-function Checkbox({ label, checked, onChange, icon: Icon }) {
+function Checkbox({ label, checked, onChange, icon: Icon, disabled = false, disabledHint = '' }) {
   return (
-    <label className={`flex items-center gap-2 border rounded px-3 py-2 text-xs font-medium cursor-pointer transition-all ${checked ? 'bg-edition-black text-white border-edition-gold' : 'bg-edition-cream text-edition-black border-edition-gold/20'}`}>
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="hidden" />
-      {Icon && <Icon className={`h-3.5 w-3.5 ${checked ? 'text-edition-gold' : 'text-gray-400'}`} />}
-      {label}
+    <label
+      title={disabled ? disabledHint : undefined}
+      className={`flex items-center gap-2 border rounded px-3 py-2 text-xs font-medium transition-all ${
+        disabled ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed line-through'
+        : checked ? 'bg-edition-black text-white border-edition-gold cursor-pointer'
+        : 'bg-edition-cream text-edition-black border-edition-gold/20 cursor-pointer'
+      }`}
+    >
+      <input type="checkbox" checked={checked && !disabled} disabled={disabled} onChange={(e) => onChange(e.target.checked)} className="hidden" />
+      {Icon && <Icon className={`h-3.5 w-3.5 ${checked && !disabled ? 'text-edition-gold' : 'text-gray-400'}`} />}
+      {label}{disabled && disabledHint ? ` — ${disabledHint}` : ''}
     </label>
   );
 }
@@ -842,6 +938,20 @@ function SignaturePad({ label, onChange, className = '' }) {
 // Vendor's live permit status card
 // ----------------------------------------------------
 function VendorPermitStatusCard({ permit, onReset, openModal }) {
+  const [marking, setMarking] = useState(false);
+  const { done, total } = dayProgress(permit);
+  const resuming = permit.status === 'pending_checkin' && hasResumedBefore(permit);
+
+  const markCompleted = async () => {
+    setMarking(true);
+    try {
+      await vendorMarkCompleted(permit.id);
+      await logAuditEvent({ permitId: permit.id, eventType: 'vendor_marked_completed', message: `${permit.companyName} marked work completed for today on ${permit.permitRef}.`, actor: permit.contractorConfirmation?.representativeName || permit.companyName });
+    } finally {
+      setMarking(false);
+    }
+  };
+
   return (
     <div className="max-w-xl mx-auto bg-white border border-edition-gold p-8 rounded shadow-lg text-center">
       <h2 className="font-display text-3xl font-semibold tracking-wider text-edition-black mb-1 uppercase">Permit {permit.permitRef}</h2>
@@ -852,12 +962,25 @@ function VendorPermitStatusCard({ permit, onReset, openModal }) {
         <p className="text-[10px] uppercase text-gray-500 tracking-widest mt-2">Permit ID: {permit.id.slice(0, 8)}</p>
       </div>
 
-      <div className={`border rounded-md py-3 px-4 mb-6 flex flex-col items-center ${statusBadgeClass(permit.status)}`}>
+      {total > 1 && (
+        <p className="text-[11px] text-gray-500 uppercase tracking-wider mb-3">Day {done + 1} of {total} &bull; Valid {permit.startDate} to {permit.endDate}</p>
+      )}
+
+      <div className={`border rounded-md py-3 px-4 mb-4 flex flex-col items-center ${statusBadgeClass(permit.status)}`}>
         <span className="flex items-center gap-1.5 font-semibold text-sm uppercase tracking-wide">
           {permit.status === 'active' ? <CheckCircle className="h-5 w-5" /> : <RefreshCw className="h-4 w-4 animate-spin" />}
-          {statusLabel(permit.status)}
+          {resuming ? 'Valid Permit — Ready to Resume at Gate 3' : statusLabel(permit.status)}
         </span>
       </div>
+
+      {permit.hccApproval?.required && (
+        <div className={`border rounded-md py-2.5 px-4 mb-6 text-xs font-semibold flex items-center justify-center gap-1.5 ${permit.hccApproval.approved ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-300 text-red-800'}`}>
+          <ShieldAlert className="h-4 w-4 shrink-0" />
+          {permit.hccApproval.approved
+            ? `HCC Approved by ${permit.hccApproval.approvedBy}`
+            : `HCC Manager Approval Pending — email documents to ${HCC_MANAGER_EMAIL}`}
+        </div>
+      )}
 
       <div className="text-left bg-edition-cream/50 p-4 rounded border border-edition-gold/10 text-sm space-y-2 mb-6">
         <Row label="Location" value={permit.workLocation} />
@@ -870,6 +993,13 @@ function VendorPermitStatusCard({ permit, onReset, openModal }) {
           <p className="italic bg-white p-2 rounded border border-edition-gold/10">{permit.descriptionOfWork}</p>
         </div>
       </div>
+
+      {permit.status === 'active' && (
+        <button onClick={markCompleted} disabled={marking}
+          className="w-full flex items-center justify-center gap-1.5 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white font-bold text-xs uppercase tracking-widest py-3 rounded mb-3">
+          <ThumbsUp className="h-4 w-4" /> {marking ? 'Submitting...' : 'Mark Work Completed for Today'}
+        </button>
+      )}
 
       <div className="grid grid-cols-2 gap-2">
         <button onClick={() => openModal('form11', permit)} className="flex items-center justify-center gap-1.5 bg-white border border-edition-gold text-edition-black text-[11px] uppercase tracking-wider py-2.5 rounded">
@@ -895,7 +1025,7 @@ function Row({ label, value }) {
 // ----------------------------------------------------
 // SECURITY GATE 3 — check-in/out, daily window status
 // ----------------------------------------------------
-function SecurityGateView({ permits }) {
+function SecurityGateView({ permits, onAssist }) {
   const [nowTick, setNowTick] = useState(new Date());
   useEffect(() => {
     const id = setInterval(() => setNowTick(new Date()), 15000);
@@ -923,16 +1053,38 @@ function SecurityGateView({ permits }) {
 
   return (
     <div className="max-w-5xl mx-auto space-y-8">
+      <div className="flex justify-end">
+        <button onClick={onAssist} className="flex items-center gap-1.5 bg-edition-black text-white text-[11px] uppercase tracking-wider px-3 py-2 rounded border border-edition-gold">
+          <UserPlus className="h-3.5 w-3.5 text-edition-gold" /> Assist New Vendor Application
+        </button>
+      </div>
+
       <GateSection title="Awaiting Gate 3 Check-In" icon={ShieldCheck} count={pendingCheckIn.length} badgeClass="bg-amber-100 border-amber-300 text-amber-800">
         {pendingCheckIn.length === 0 ? <Empty text="No permits awaiting entry check-in." /> : (
           <div className="grid md:grid-cols-2 gap-4">
-            {pendingCheckIn.map((permit) => (
-              <PermitGateCard key={permit.id} permit={permit}>
-                <button onClick={() => doBatchCheckIn(permit)} className="w-full flex items-center justify-center gap-1.5 bg-edition-black text-white hover:bg-edition-charcoal text-[11px] uppercase tracking-widest font-semibold py-3 px-4 rounded border border-edition-gold">
-                  <UserCheck className="h-4 w-4 text-edition-gold" /> Check-In All Crew ({crewSizeOf(permit)})
-                </button>
-              </PermitGateCard>
-            ))}
+            {pendingCheckIn.map((permit) => {
+              const hccBlocked = permit.hccApproval?.required && !permit.hccApproval?.approved;
+              const resuming = hasResumedBefore(permit);
+              const { done, total } = dayProgress(permit);
+              return (
+                <PermitGateCard key={permit.id} permit={permit}>
+                  {resuming && (
+                    <div className="bg-blue-50 border border-blue-200 text-blue-800 rounded px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider mb-2">
+                      Resuming — Day {done + 1} of {total}, already authorized
+                    </div>
+                  )}
+                  {hccBlocked ? (
+                    <div className="bg-red-50 border border-red-300 text-red-800 rounded p-2.5 text-[11px] font-semibold flex items-center gap-1.5">
+                      <ShieldAlert className="h-4 w-4 shrink-0" /> Blocked — Awaiting HCC Manager Approval
+                    </div>
+                  ) : (
+                    <button onClick={() => doBatchCheckIn(permit)} className="w-full flex items-center justify-center gap-1.5 bg-edition-black text-white hover:bg-edition-charcoal text-[11px] uppercase tracking-widest font-semibold py-3 px-4 rounded border border-edition-gold">
+                      <UserCheck className="h-4 w-4 text-edition-gold" /> {resuming ? 'Resume Check-In' : 'Check-In All Crew'} ({crewSizeOf(permit)})
+                    </button>
+                  )}
+                </PermitGateCard>
+              );
+            })}
           </div>
         )}
       </GateSection>
@@ -971,13 +1123,20 @@ function SecurityGateView({ permits }) {
       <GateSection title="Awaiting Gate 3 Check-Out" icon={Clock} count={pendingCheckOut.length} badgeClass="bg-purple-100 border-purple-300 text-purple-800">
         {pendingCheckOut.length === 0 ? <Empty text="No crews cleared for release yet." /> : (
           <div className="grid md:grid-cols-2 gap-4">
-            {pendingCheckOut.map((permit) => (
-              <PermitGateCard key={permit.id} permit={permit}>
-                <button onClick={() => doBatchCheckOut(permit)} className="w-full flex items-center justify-center gap-1.5 bg-purple-700 hover:bg-purple-800 text-white text-[11px] uppercase tracking-widest font-semibold py-3 px-4 rounded">
-                  <UserX className="h-4 w-4" /> Check-Out & Release All Crew ({crewSizeOf(permit)})
-                </button>
-              </PermitGateCard>
-            ))}
+            {pendingCheckOut.map((permit) => {
+              const isLastDay = todayIso() >= permit.endDate;
+              const isFinal = permit.closureMode === 'series' || isLastDay;
+              return (
+                <PermitGateCard key={permit.id} permit={permit}>
+                  <div className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded mb-2 inline-block ${isFinal ? 'bg-red-50 text-red-700' : 'bg-blue-50 text-blue-700'}`}>
+                    {isFinal ? 'Final — Permit Closes on Checkout' : 'Day Closure — Permit Resumes Tomorrow'}
+                  </div>
+                  <button onClick={() => doBatchCheckOut(permit)} className="w-full flex items-center justify-center gap-1.5 bg-purple-700 hover:bg-purple-800 text-white text-[11px] uppercase tracking-widest font-semibold py-3 px-4 rounded">
+                    <UserX className="h-4 w-4" /> {isFinal ? 'Check-Out, Return IDs & Close Permit' : 'Check-Out & Return IDs for Today'} ({crewSizeOf(permit)})
+                  </button>
+                </PermitGateCard>
+              );
+            })}
           </div>
         )}
       </GateSection>
@@ -1028,14 +1187,16 @@ function PermitGateCard({ permit, children }) {
 // ----------------------------------------------------
 // ENGINEERING SUPERVISOR HUB — Section 8 & 9
 // ----------------------------------------------------
-function SupervisorHubView({ permits, openModal }) {
+function SupervisorHubView({ permits, openModal, onAssist }) {
   const [loggedIn, setLoggedIn] = useState(false);
   const [password, setPassword] = useState('');
   const [section8Permit, setSection8Permit] = useState(null);
   const [section9Permit, setSection9Permit] = useState(null);
+  const [ackPermit, setAckPermit] = useState(null);
 
   const pendingReceipt = permits.filter((p) => p.status === 'pending_receipt');
   const activeWork = permits.filter((p) => p.status === 'active');
+  const pendingAck = permits.filter((p) => p.status === 'pending_completion_ack');
 
   const handleLogin = (e) => {
     e.preventDefault();
@@ -1060,6 +1221,12 @@ function SupervisorHubView({ permits, openModal }) {
 
   return (
     <div className="max-w-5xl mx-auto space-y-8">
+      <div className="flex justify-end">
+        <button onClick={onAssist} className="flex items-center gap-1.5 bg-edition-black text-white text-[11px] uppercase tracking-wider px-3 py-2 rounded border border-edition-gold">
+          <UserPlus className="h-3.5 w-3.5 text-edition-gold" /> Assist New Vendor Application
+        </button>
+      </div>
+
       <div>
         <h3 className="text-sm font-bold uppercase text-edition-black tracking-widest mb-3 border-b border-edition-gold/10 pb-1.5">
           Section 8 · Awaiting Department Receipt ({pendingReceipt.length})
@@ -1079,8 +1246,27 @@ function SupervisorHubView({ permits, openModal }) {
 
       <div>
         <h3 className="text-sm font-bold uppercase text-edition-black tracking-widest mb-3 border-b border-edition-gold/10 pb-1.5">
-          Section 9 · Active Crews — Cessation of Work ({activeWork.length})
+          Awaiting Completion Acknowledgment ({pendingAck.length})
         </h3>
+        <p className="text-[11px] text-gray-500 -mt-2 mb-3">The vendor has marked work completed for today. Acknowledge and choose whether this closes the permit for the day or for good.</p>
+        {pendingAck.length === 0 ? <Empty text="No completions awaiting acknowledgment." /> : (
+          <div className="grid md:grid-cols-2 gap-4">
+            {pendingAck.map((permit) => (
+              <PermitGateCard key={permit.id} permit={permit}>
+                <button onClick={() => setAckPermit(permit)} className="w-full flex items-center justify-center gap-1.5 bg-teal-600 hover:bg-teal-700 text-white text-[11px] uppercase tracking-widest font-semibold py-3 px-4 rounded">
+                  <ThumbsUp className="h-4 w-4" /> Acknowledge Completion
+                </button>
+              </PermitGateCard>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <h3 className="text-sm font-bold uppercase text-edition-black tracking-widest mb-3 border-b border-edition-gold/10 pb-1.5">
+          Section 9 · Active Crews — Manual Cessation Override ({activeWork.length})
+        </h3>
+        <p className="text-[11px] text-gray-500 -mt-2 mb-3">Normally the vendor marks work completed themselves. Use this only if Engineering needs to close it on their behalf.</p>
         {activeWork.length === 0 ? <Empty text="No active vendor crews on site." /> : (
           <div className="grid md:grid-cols-2 gap-4">
             {activeWork.map((permit) => (
@@ -1097,7 +1283,51 @@ function SupervisorHubView({ permits, openModal }) {
 
       {section8Permit && <SupervisorSection8Modal permit={section8Permit} onClose={() => setSection8Permit(null)} />}
       {section9Permit && <ContractorSection9Modal permit={section9Permit} onClose={() => setSection9Permit(null)} />}
+      {ackPermit && <CompletionAckModal permit={ackPermit} onClose={() => setAckPermit(null)} />}
     </div>
+  );
+}
+
+function CompletionAckModal({ permit, onClose }) {
+  const [ackBy, setAckBy] = useState('');
+  const [notes, setNotes] = useState('');
+  const isLastDay = todayIso() >= permit.endDate;
+  const { done, total } = dayProgress(permit);
+
+  const choose = async (closureMode) => {
+    if (!ackBy) { alert('Enter the acknowledging engineer\'s name.'); return; }
+    await acknowledgeCompletion(permit.id, closureMode, ackBy, notes);
+    await logAuditEvent({
+      permitId: permit.id,
+      eventType: 'completion_acknowledged',
+      message: `Engineering acknowledged completion for ${permit.permitRef} — ${closureMode === 'series' ? 'closing the series (final)' : 'closing the day, permit remains valid'}.`,
+      actor: ackBy,
+    });
+    onClose();
+  };
+
+  return (
+    <ModalShell title="Acknowledge Work Completion" subtitle={`Permit ${permit.permitRef} — ${permit.companyName} — Day ${done + 1} of ${total}`} onClose={onClose}>
+      <Field label="Acknowledged By *">
+        <input value={ackBy} onChange={(e) => setAckBy(e.target.value)} className={inputCls} placeholder="Engineering supervisor name" />
+      </Field>
+      <Field label="Notes (optional)" className="mt-3">
+        <textarea rows="2" value={notes} onChange={(e) => setNotes(e.target.value)} className={inputCls} placeholder="Area inspected and left safe, etc." />
+      </Field>
+
+      <div className="grid grid-cols-1 gap-3 mt-5">
+        <button onClick={() => choose('day')} disabled={isLastDay}
+          className="w-full text-left bg-blue-50 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed border border-blue-300 text-blue-900 rounded p-3">
+          <span className="block text-xs font-bold uppercase tracking-wider">Close the Day</span>
+          <span className="block text-[11px] mt-0.5">Permit stays valid through {permit.endDate}. Security can resume check-in tomorrow with no new approval.{isLastDay ? ' (Unavailable — today is the last scheduled day.)' : ''}</span>
+        </button>
+        <button onClick={() => choose('series')}
+          className="w-full text-left bg-red-50 hover:bg-red-100 border border-red-300 text-red-900 rounded p-3">
+          <span className="block text-xs font-bold uppercase tracking-wider">Close the Series (Final)</span>
+          <span className="block text-[11px] mt-0.5">The permit ends for good once Security checks the crew out.</span>
+        </button>
+      </div>
+    </ModalShell>
   );
 }
 
@@ -1122,14 +1352,25 @@ function SupervisorSection8Modal({ permit, onClose }) {
   const [supervisorName, setSupervisorName] = useState('');
   const [notes, setNotes] = useState('');
   const [signatureData, setSignatureData] = useState('');
+  const isHighRisk = permit.riskLevel === 'High';
+  const [hccApproved, setHccApproved] = useState(permit.hccApproval?.approved || false);
+  const [hccManagerName, setHccManagerName] = useState(permit.hccApproval?.approvedBy || '');
+  const [hccNotes, setHccNotes] = useState('');
 
   const authorize = async () => {
     if (!supervisorName) { alert('Enter the authorizing supervisor name.'); return; }
-    await updatePermit(permit.id, {
+    if (isHighRisk && !hccApproved) { alert('This is a High-Risk permit — HCC Manager approval is required before Section 8 authorization.'); return; }
+    if (isHighRisk && !hccManagerName) { alert('Enter the HCC Manager\'s name.'); return; }
+
+    const patch = {
       departmentReceipt: { authorized: true, supervisorName, authorizedAt: new Date().toISOString().replace('T', ' ').slice(0, 16), notes, signatureDataUrl: signatureData },
       status: 'pending_checkin',
-    });
-    await logAuditEvent({ permitId: permit.id, eventType: 'section8_authorized', message: `Section 8 receipt authorized for ${permit.permitRef}.${notes ? ' Note: ' + notes : ''}`, actor: supervisorName });
+    };
+    if (isHighRisk) {
+      patch.hccApproval = { required: true, approved: true, approvedBy: hccManagerName, approvedAt: new Date().toISOString().replace('T', ' ').slice(0, 16), notes: hccNotes };
+    }
+    await updatePermit(permit.id, patch);
+    await logAuditEvent({ permitId: permit.id, eventType: 'section8_authorized', message: `Section 8 receipt authorized for ${permit.permitRef}.${isHighRisk ? ` HCC approved by ${hccManagerName}.` : ''}${notes ? ' Note: ' + notes : ''}`, actor: supervisorName });
     fireConfetti();
     onClose();
   };
@@ -1142,6 +1383,24 @@ function SupervisorSection8Modal({ permit, onClose }) {
         <Row label="Validity" value={`${permit.startDate} to ${permit.endDate}`} />
         <Row label="Daily Hours" value={`${permit.startTime} - ${permit.endTime}`} />
       </div>
+
+      {isHighRisk && (
+        <div className="bg-red-50 border border-red-300 text-red-800 rounded p-3 text-xs mb-4">
+          <p className="font-bold uppercase tracking-wide flex items-center gap-1.5 mb-1"><ShieldAlert className="h-4 w-4" /> High-Risk Permit — HCC Approval Required</p>
+          <p className="mb-2">The vendor was instructed to email their Risk Assessment and Method Statement to {HCC_MANAGER_EMAIL}. Confirm the HCC Manager has reviewed and approved before authorizing.</p>
+          <Field label="HCC Manager Name *">
+            <input value={hccManagerName} onChange={(e) => setHccManagerName(e.target.value)} className={inputCls} placeholder="e.g. Fatima Al Suwaidi (HCC Manager)" />
+          </Field>
+          <Field label="HCC Notes (optional)" className="mt-2">
+            <input value={hccNotes} onChange={(e) => setHccNotes(e.target.value)} className={inputCls} placeholder="e.g. Reviewed rigging plan, approved with conditions" />
+          </Field>
+          <label className="flex items-center gap-2 mt-2 text-xs font-semibold">
+            <input type="checkbox" checked={hccApproved} onChange={(e) => setHccApproved(e.target.checked)} />
+            HCC Manager has reviewed and approved this permit's risk documentation.
+          </label>
+        </div>
+      )}
+
       <Field label="Supervisor Name *">
         <input value={supervisorName} onChange={(e) => setSupervisorName(e.target.value)} className={inputCls} placeholder="e.g. Hamdan Al Zaabi (Director of Engineering)" />
       </Field>
@@ -1149,7 +1408,8 @@ function SupervisorSection8Modal({ permit, onClose }) {
         <textarea rows="2" value={notes} onChange={(e) => setNotes(e.target.value)} className={inputCls} placeholder="e.g. Fire watch mandatory, work must cease before dinner service..." />
       </Field>
       <SignaturePad label="Supervisor Signature" onChange={setSignatureData} className="mt-3" />
-      <button onClick={authorize} className="w-full mt-4 bg-edition-gold hover:bg-edition-darkGold text-edition-black font-bold text-xs uppercase tracking-widest py-3 rounded border border-edition-gold">
+      <button onClick={authorize} disabled={isHighRisk && !hccApproved}
+        className="w-full mt-4 bg-edition-gold hover:bg-edition-darkGold disabled:opacity-40 disabled:cursor-not-allowed text-edition-black font-bold text-xs uppercase tracking-widest py-3 rounded border border-edition-gold">
         Authorize Receipt &amp; Release to Gate 3
       </button>
     </ModalShell>

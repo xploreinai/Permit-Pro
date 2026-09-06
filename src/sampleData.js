@@ -21,21 +21,10 @@ export const HOTEL_LOCATIONS = [
   { name: 'Back of House', riskLevel: 'High' },
 ];
 
-export const PERMIT_TYPES = [
-  { id: 'hot_work', label: 'Hot Work', ptwKey: 'hotWork', defaultRisk: 'High' },
-  { id: 'heights', label: 'Working at Heights', ptwKey: 'workingAtHeights', defaultRisk: 'High' },
-  { id: 'confined_space', label: 'Confined Space', ptwKey: 'confinedSpace', defaultRisk: 'High' },
-  { id: 'electrical', label: 'Electrical', ptwKey: 'others', defaultRisk: 'High' },
-  { id: 'general', label: 'General / Regular', ptwKey: null, defaultRisk: 'Regular' },
-];
-
-// Permit types that involve noisy work (welding, grinding, cutting, etc.) —
-// these are only ever allowed on a Day Permit, never on a Night Work Permit.
-export const NOISY_PERMIT_TYPE_IDS = ['hot_work'];
-
 // There are exactly two permit time categories. A Day Permit always runs
 // 10:00-17:00 — not editable, no shift picker. A Night Work Permit is kept
-// deliberately separate and cannot carry noisy work (see NOISY_PERMIT_TYPE_IDS).
+// deliberately separate and cannot carry noisy work (Hot Work — welding,
+// cutting, grinding); that stays restricted to the Day Permit's 10-5 window.
 export const PERMIT_TIME_TYPES = [
   { id: 'day', label: 'Day Permit', hoursLabel: '10:00 AM – 5:00 PM', startTime: '10:00', endTime: '17:00', fixed: true },
   { id: 'night', label: 'Night Work Permit', hoursLabel: 'Custom night hours', startTime: '18:00', endTime: '06:00', fixed: false },
@@ -43,6 +32,9 @@ export const PERMIT_TIME_TYPES = [
 
 export const DURATION_PRESETS = [1, 2, 3, 4, 5, 7];
 export const MAX_PERMIT_DAYS = 7;
+
+// PLACEHOLDER — replace with the real HCC Manager's email address.
+export const HCC_MANAGER_EMAIL = 'hcc.manager@theeditionhotels.com';
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -186,6 +178,11 @@ export const INITIAL_PERMITS = [
     },
     cessationOfWork: { isCompleted: false, signedBy: '', time: '', notes: '', signatureDataUrl: '' },
     cancellation: { isCancelled: false, signedBy: '', date: '', time: '', signatureDataUrl: '' },
+    dailyLog: [{ date: '2026-08-30', checkedInAt: '2026-08-30 08:15', checkedOutAt: null }],
+    hccApproval: { required: true, approved: true, approvedBy: 'Fatima Al Suwaidi (HCC Manager)', approvedAt: '2026-08-30 08:20', notes: 'Risk assessment received by email and reviewed.' },
+    closureMode: null,
+    completionAck: {},
+    submittedByStaff: '',
     status: 'active',
     idPhotoUrl: '',
     workers: withBadges(CREW_PRESET_6.workers, 41).map((w) => ({

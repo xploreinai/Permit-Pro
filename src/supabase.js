@@ -46,6 +46,11 @@ const CAMEL_TO_SNAKE = {
   contractorConfirmation: 'contractor_confirmation',
   departmentReceipt: 'department_receipt',
   cessationOfWork: 'cessation_of_work',
+  dailyLog: 'daily_log',
+  hccApproval: 'hcc_approval',
+  closureMode: 'closure_mode',
+  completionAck: 'completion_ack',
+  submittedByStaff: 'submitted_by_staff',
   idPhotoUrl: 'id_photo_url',
   createdAt: 'created_at',
   updatedAt: 'updated_at',
@@ -72,6 +77,23 @@ function fromRow(row) {
 
 function nowStamp() {
   return new Date().toISOString().replace('T', ' ').slice(0, 16);
+}
+
+function todayIso() {
+  return new Date().toISOString().split('T')[0];
+}
+
+// Stamps today's entry in a permit's dailyLog (one row per scheduled day).
+function markDailyLog(dailyLog, field, value) {
+  const today = todayIso();
+  const log = dailyLog && dailyLog.length ? dailyLog : [];
+  const idx = log.findIndex((d) => d.date === today);
+  if (idx === -1) {
+    return [...log, { date: today, checkedInAt: field === 'checkedInAt' ? value : null, checkedOutAt: field === 'checkedOutAt' ? value : null }];
+  }
+  const next = [...log];
+  next[idx] = { ...next[idx], [field]: value };
+  return next;
 }
 
 function formatPermitRef(seq) {
@@ -286,15 +308,46 @@ export async function batchCheckInPermit(permitId) {
   if (!permit) return null;
   const time = nowStamp();
   const workers = permit.workers.map((w) => ({ ...w, isCheckedIn: true, checkInTime: time, checkOutTime: null }));
-  return updatePermit(permitId, { workers, status: 'active' });
+  const dailyLog = markDailyLog(permit.dailyLog, 'checkedInAt', time);
+  return updatePermit(permitId, { workers, dailyLog, status: 'active' });
 }
 
+// Checking out ends today's on-site session. If Engineering chose "Close the
+// Day" (closureMode: 'day') and the permit still has scheduled days left,
+// the permit goes back to pending_checkin so Security can resume it tomorrow
+// with no new approval — Section 8 already covers the whole date range.
+// "Close the Series", or checking out on the permit's last scheduled day,
+// ends it for good.
 export async function batchCheckOutPermit(permitId) {
   const permit = useMock ? mockStore.getPermit(permitId) : await fetchPermit(permitId);
   if (!permit) return null;
   const time = nowStamp();
   const workers = permit.workers.map((w) => ({ ...w, isCheckedIn: false, checkOutTime: time }));
-  return updatePermit(permitId, { workers, status: 'completed' });
+  const dailyLog = markDailyLog(permit.dailyLog, 'checkedOutAt', time);
+  const isLastScheduledDay = todayIso() >= permit.endDate;
+  const isFinal = permit.closureMode === 'series' || isLastScheduledDay;
+  return updatePermit(permitId, {
+    workers,
+    dailyLog,
+    status: isFinal ? 'completed' : 'pending_checkin',
+    closureMode: isFinal ? permit.closureMode : null,
+  });
+}
+
+// Vendor-initiated: "I'm done for the day" — routes to Engineering for
+// acknowledgment before Security can check the crew out.
+export async function vendorMarkCompleted(permitId) {
+  return updatePermit(permitId, { status: 'pending_completion_ack' });
+}
+
+// Engineering's acknowledgment step — records who acknowledged it and which
+// closure mode they chose (day vs. series), then releases to Security.
+export async function acknowledgeCompletion(permitId, closureMode, ackBy, notes = '') {
+  return updatePermit(permitId, {
+    closureMode,
+    completionAck: { ackBy, ackAt: nowStamp(), closureMode, notes },
+    status: 'pending_checkout',
+  });
 }
 
 export async function logAuditEvent(entry) {
