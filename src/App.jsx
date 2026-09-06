@@ -116,6 +116,17 @@ function fireConfetti() {
 // ----------------------------------------------------
 // ROOT APP
 // ----------------------------------------------------
+// True only for the dedicated vendor-application link (?view=apply) — that
+// link is what gets shared/QR-coded to contractors, so it must never expose
+// the staff nav or any other section, no matter what `activeTab` holds.
+const isVendorOnlyLink = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('view') === 'apply';
+
+function vendorLinkUrl() {
+  const url = new URL(window.location.href);
+  url.search = '?view=apply';
+  return url.toString();
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState('vendor');
   const [permits, setPermits] = useState([]);
@@ -207,21 +218,25 @@ function App() {
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="hidden md:flex items-center gap-1.5 bg-edition-charcoal border border-edition-gold/30 px-3 py-1.5 rounded text-[11px] font-mono">
-              <span className={`h-2 w-2 rounded-full bg-green-400 beacon-pulse`} />
-              GST {gstTime}
-            </div>
-            <div className="flex items-center gap-1.5 bg-edition-gold text-edition-black px-3 py-1.5 rounded text-[11px] font-bold uppercase tracking-wider">
-              <Users className="h-3.5 w-3.5" />
-              {totalOnSiteHeadcount} On Site
-            </div>
-            <button
-              onClick={() => openModal('shareLink')}
-              title="Share the vendor application link / QR code"
-              className="p-2 rounded border bg-edition-charcoal text-edition-gold border-edition-gold/30 hover:border-edition-gold transition-all"
-            >
-              <Share2 className="h-4 w-4" />
-            </button>
+            {!isVendorOnlyLink && (
+              <>
+                <div className="hidden md:flex items-center gap-1.5 bg-edition-charcoal border border-edition-gold/30 px-3 py-1.5 rounded text-[11px] font-mono">
+                  <span className={`h-2 w-2 rounded-full bg-green-400 beacon-pulse`} />
+                  GST {gstTime}
+                </div>
+                <div className="flex items-center gap-1.5 bg-edition-gold text-edition-black px-3 py-1.5 rounded text-[11px] font-bold uppercase tracking-wider">
+                  <Users className="h-3.5 w-3.5" />
+                  {totalOnSiteHeadcount} On Site
+                </div>
+                <button
+                  onClick={() => openModal('shareLink')}
+                  title="Share the vendor application link / QR code"
+                  className="p-2 rounded border bg-edition-charcoal text-edition-gold border-edition-gold/30 hover:border-edition-gold transition-all"
+                >
+                  <Share2 className="h-4 w-4" />
+                </button>
+              </>
+            )}
             <button
               onClick={() => setGrayscale((g) => !g)}
               title="Toggle black-and-white mode"
@@ -232,28 +247,33 @@ function App() {
           </div>
         </div>
 
-        <nav className="max-w-7xl mx-auto flex flex-wrap bg-edition-charcoal p-1 rounded border border-edition-gold/30 mt-4">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setActiveTab(t.id)}
-              className={`relative px-4 py-2 rounded-sm text-xs font-medium uppercase tracking-wider transition-all duration-200 ${
-                activeTab === t.id ? 'bg-edition-gold text-edition-black shadow' : 'text-gray-300 hover:text-white'
-              }`}
-            >
-              {t.label}
-              {t.id === 'supervisor' && pendingReceiptCount > 0 && (
-                <span className="absolute -top-1.5 -right-1.5 bg-red-600 text-white text-[9px] font-bold h-4 w-4 rounded-full flex items-center justify-center">
-                  {pendingReceiptCount}
-                </span>
-              )}
-            </button>
-          ))}
-        </nav>
+        {/* The vendor-application link (?view=apply) never renders this nav —
+            a contractor on that link has no way to reach any staff-only
+            section, regardless of what's typed into the address bar. */}
+        {!isVendorOnlyLink && (
+          <nav className="max-w-7xl mx-auto flex flex-wrap bg-edition-charcoal p-1 rounded border border-edition-gold/30 mt-4">
+            {tabs.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setActiveTab(t.id)}
+                className={`relative px-4 py-2 rounded-sm text-xs font-medium uppercase tracking-wider transition-all duration-200 ${
+                  activeTab === t.id ? 'bg-edition-gold text-edition-black shadow' : 'text-gray-300 hover:text-white'
+                }`}
+              >
+                {t.label}
+                {t.id === 'supervisor' && pendingReceiptCount > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 bg-red-600 text-white text-[9px] font-bold h-4 w-4 rounded-full flex items-center justify-center">
+                    {pendingReceiptCount}
+                  </span>
+                )}
+              </button>
+            ))}
+          </nav>
+        )}
       </header>
 
       <main className="flex-grow max-w-7xl w-full mx-auto p-4 md:p-8">
-        {activeTab === 'vendor' && (
+        {(isVendorOnlyLink || activeTab === 'vendor') && (
           <VendorPortalView
             activePermit={activePermit}
             setActivePermitId={setActivePermitId}
@@ -262,10 +282,20 @@ function App() {
             clearAssist={clearAssist}
           />
         )}
-        {activeTab === 'security' && <SecurityGateView permits={permits} onAssist={() => startAssist('Security Gate 3')} />}
-        {activeTab === 'supervisor' && <SupervisorHubView permits={permits} openModal={openModal} onAssist={() => startAssist('Engineering Supervisor')} />}
-        {activeTab === 'admin' && (
-          <AdminDashboardView permits={permits} auditLogs={auditLogs} totalOnSiteHeadcount={totalOnSiteHeadcount} openModal={openModal} />
+        {!isVendorOnlyLink && activeTab === 'security' && (
+          <StaffGate area="Security Gate 3">
+            <SecurityGateView permits={permits} onAssist={() => startAssist('Security Gate 3')} />
+          </StaffGate>
+        )}
+        {!isVendorOnlyLink && activeTab === 'supervisor' && (
+          <StaffGate area="Engineering Supervisor">
+            <SupervisorHubView permits={permits} openModal={openModal} onAssist={() => startAssist('Engineering Supervisor')} />
+          </StaffGate>
+        )}
+        {!isVendorOnlyLink && activeTab === 'admin' && (
+          <StaffGate area="EHS Admin Dashboard">
+            <AdminDashboardView permits={permits} auditLogs={auditLogs} totalOnSiteHeadcount={totalOnSiteHeadcount} openModal={openModal} />
+          </StaffGate>
         )}
       </main>
 
@@ -283,11 +313,54 @@ function App() {
 }
 
 // ----------------------------------------------------
+// STAFF GATE — keeps every staff-only section behind a PIN. Shared across
+// Security, Supervisor and Admin so a contractor who somehow lands on the
+// staff URL (rather than the vendor-only link) still can't see anything —
+// this is basic pilot-mode protection, not real authentication: the PIN
+// lives in this client bundle and the database has no per-role access
+// control behind it. Treat it as a lock on the door, not a vault.
+function StaffGate({ area, children }) {
+  const [unlocked, setUnlocked] = useState(() => {
+    try {
+      return sessionStorage.getItem('permit_pro_staff_unlocked') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [pin, setPin] = useState('');
+
+  const handleLogin = (e) => {
+    e.preventDefault();
+    if (pin === '1234' || pin === 'admin') {
+      try { sessionStorage.setItem('permit_pro_staff_unlocked', '1'); } catch { /* per-viewer convenience only */ }
+      setUnlocked(true);
+    } else {
+      alert('Invalid staff PIN.');
+    }
+  };
+
+  if (unlocked) return children;
+
+  return (
+    <div className="max-w-md mx-auto bg-white border border-edition-gold p-6 rounded shadow-lg text-center mt-12">
+      <LogIn className="h-10 w-10 text-edition-gold mx-auto mb-3" />
+      <h2 className="text-xl font-bold tracking-wider text-edition-black uppercase">{area}</h2>
+      <p className="text-xs text-gray-500 mb-4">Staff access only — enter the PIN to continue.</p>
+      <form onSubmit={handleLogin} className="space-y-4">
+        <input type="password" placeholder="Enter Staff PIN" value={pin} onChange={(e) => setPin(e.target.value)}
+          className="w-full bg-edition-cream border border-edition-gold/30 rounded px-3 py-2 text-center text-sm focus:outline-none focus:border-edition-gold font-medium" required autoFocus />
+        <button type="submit" className="w-full bg-edition-black text-white hover:bg-edition-charcoal text-xs uppercase tracking-widest py-3 rounded border border-edition-gold">Unlock</button>
+      </form>
+    </div>
+  );
+}
+
+// ----------------------------------------------------
 // SHARE APPLICATION LINK — QR + copyable URL for off-site contractors
 // ----------------------------------------------------
 function ShareApplicationModal({ onClose }) {
   const [copied, setCopied] = useState(false);
-  const url = typeof window !== 'undefined' ? window.location.href : '';
+  const url = vendorLinkUrl();
 
   const copyLink = async () => {
     try {
@@ -300,13 +373,13 @@ function ShareApplicationModal({ onClose }) {
   };
 
   return (
-    <ModalShell title="Apply for a Work Permit" subtitle="Show this QR code, or share the link, with any contractor — on-site or off-site" onClose={onClose}>
+    <ModalShell title="Apply for a Work Permit" subtitle="Safe to share with any contractor — on-site or off-site" onClose={onClose}>
       <div className="flex flex-col items-center">
         <div className="bg-edition-cream p-4 rounded border border-edition-gold/30 mb-4">
           <QRCodeCanvas value={url} size={180} bgColor="#FAF8F5" fgColor="#1A1A1A" />
         </div>
         <p className="text-xs text-gray-600 text-center mb-3">
-          Scanning this code (or opening the link below) opens the Vendor Portal directly, ready for a new permit application.
+          This link opens <strong>only</strong> the application form — no staff sections, no other permits' data. Safe to post publicly or hand to any contractor.
         </p>
         <div className="w-full bg-edition-cream border border-edition-gold/30 rounded px-3 py-2 text-xs font-mono break-all mb-3">
           {url}
@@ -1188,8 +1261,6 @@ function PermitGateCard({ permit, children }) {
 // ENGINEERING SUPERVISOR HUB — Section 8 & 9
 // ----------------------------------------------------
 function SupervisorHubView({ permits, openModal, onAssist }) {
-  const [loggedIn, setLoggedIn] = useState(false);
-  const [password, setPassword] = useState('');
   const [section8Permit, setSection8Permit] = useState(null);
   const [section9Permit, setSection9Permit] = useState(null);
   const [ackPermit, setAckPermit] = useState(null);
@@ -1197,27 +1268,6 @@ function SupervisorHubView({ permits, openModal, onAssist }) {
   const pendingReceipt = permits.filter((p) => p.status === 'pending_receipt');
   const activeWork = permits.filter((p) => p.status === 'active');
   const pendingAck = permits.filter((p) => p.status === 'pending_completion_ack');
-
-  const handleLogin = (e) => {
-    e.preventDefault();
-    if (password === '1234' || password === 'admin') setLoggedIn(true);
-    else alert('Invalid Engineering Supervisor access PIN.');
-  };
-
-  if (!loggedIn) {
-    return (
-      <div className="max-w-md mx-auto bg-white border border-edition-gold p-6 rounded shadow-lg text-center mt-12">
-        <LogIn className="h-10 w-10 text-edition-gold mx-auto mb-3" />
-        <h2 className="text-xl font-bold tracking-wider text-edition-black uppercase">Supervisor Portal</h2>
-        <p className="text-xs text-gray-500 mb-4">Engineering Department Authorization Gateway</p>
-        <form onSubmit={handleLogin} className="space-y-4">
-          <input type="password" placeholder="Enter Supervisor PIN (e.g. 1234)" value={password} onChange={(e) => setPassword(e.target.value)}
-            className="w-full bg-edition-cream border border-edition-gold/30 rounded px-3 py-2 text-center text-sm focus:outline-none focus:border-edition-gold font-medium" required autoFocus />
-          <button type="submit" className="w-full bg-edition-black text-white hover:bg-edition-charcoal text-xs uppercase tracking-widest py-3 rounded border border-edition-gold">Authenticate</button>
-        </form>
-      </div>
-    );
-  }
 
   return (
     <div className="max-w-5xl mx-auto space-y-8">
