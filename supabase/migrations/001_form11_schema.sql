@@ -19,6 +19,9 @@ create table if not exists permits (
   start_date date not null,
   end_date date not null,
   duration_days integer not null default 1,
+  -- 'day' (fixed 10:00-17:00, can carry noisy/hot work) or 'night' (custom
+  -- hours, noisy work never permitted).
+  permit_time_type text not null default 'day',
   start_time text not null,
   end_time text not null,
   daily_schedule jsonb not null default '[]'::jsonb,

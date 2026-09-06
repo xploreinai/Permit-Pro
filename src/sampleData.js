@@ -1,16 +1,24 @@
 // Static reference data for Permit Pro — The Abu Dhabi EDITION.
 // TADE-OSHMS-Form 11 (Rev 01, February 2024).
 
+// Sentinel value for the "type your own location" dropdown option.
+export const TYPE_LOCATION_VALUE = '__type__';
+
 export const HOTEL_LOCATIONS = [
-  { name: 'Oak Room - Signature Steakhouse Kitchen (Ground Floor, F&B)', riskLevel: 'High' },
-  { name: 'Annex Rooftop & Solarium', riskLevel: 'High' },
-  { name: 'Alba Terrace & Pool Deck', riskLevel: 'Regular' },
-  { name: 'Grand Ballroom & Meeting Rooms', riskLevel: 'Regular' },
-  { name: 'B2 Central Chiller Plant', riskLevel: 'High' },
-  { name: 'Lobby & Reception', riskLevel: 'Regular' },
-  { name: 'Marina Bedrooms (Floors 1-4)', riskLevel: 'Regular' },
-  { name: 'Royal Suite (Floor 5)', riskLevel: 'Regular' },
-  { name: 'Back of House / Engineering Plant', riskLevel: 'High' },
+  { name: 'Ballroom', riskLevel: 'Regular' },
+  { name: 'Meeting Rooms', riskLevel: 'Regular' },
+  { name: 'Oak Room', riskLevel: 'Regular' },
+  { name: 'Market', riskLevel: 'Regular' },
+  { name: 'Lobby', riskLevel: 'Regular' },
+  { name: 'Guest Room', riskLevel: 'Regular' },
+  { name: 'Corridor', riskLevel: 'Regular' },
+  { name: 'First Floor', riskLevel: 'Regular' },
+  { name: 'Second Floor', riskLevel: 'Regular' },
+  { name: 'Third Floor', riskLevel: 'Regular' },
+  { name: 'Fourth Floor', riskLevel: 'Regular' },
+  { name: 'Fifth Floor', riskLevel: 'Regular' },
+  { name: 'Rooftop', riskLevel: 'High' },
+  { name: 'Back of House', riskLevel: 'High' },
 ];
 
 export const PERMIT_TYPES = [
@@ -21,11 +29,16 @@ export const PERMIT_TYPES = [
   { id: 'general', label: 'General / Regular', ptwKey: null, defaultRisk: 'Regular' },
 ];
 
-export const SHIFT_PRESETS = [
-  { id: 'day', label: 'Standard Day Shift', startTime: '08:00', endTime: '17:00', hours: 9 },
-  { id: 'morning', label: 'Morning Shift', startTime: '06:00', endTime: '14:00', hours: 8 },
-  { id: 'extended', label: '12-Hour Extended Day', startTime: '07:00', endTime: '19:00', hours: 12 },
-  { id: 'night', label: 'Night Shift / Overtime', startTime: '22:00', endTime: '06:00', hours: 8 },
+// Permit types that involve noisy work (welding, grinding, cutting, etc.) —
+// these are only ever allowed on a Day Permit, never on a Night Work Permit.
+export const NOISY_PERMIT_TYPE_IDS = ['hot_work'];
+
+// There are exactly two permit time categories. A Day Permit always runs
+// 10:00-17:00 — not editable, no shift picker. A Night Work Permit is kept
+// deliberately separate and cannot carry noisy work (see NOISY_PERMIT_TYPE_IDS).
+export const PERMIT_TIME_TYPES = [
+  { id: 'day', label: 'Day Permit', hoursLabel: '10:00 AM – 5:00 PM', startTime: '10:00', endTime: '17:00', fixed: true },
+  { id: 'night', label: 'Night Work Permit', hoursLabel: 'Custom night hours', startTime: '18:00', endTime: '06:00', fixed: false },
 ];
 
 export const DURATION_PRESETS = [1, 2, 3, 4, 5, 7];
@@ -60,16 +73,19 @@ export function diffDaysInclusive(startDate, endDate) {
   return Math.round((end - start) / 86400000) + 1;
 }
 
+// Emirates ID: 784-YYYY-NNNNNNN-C. Expiry is validated separately per worker.
+const FAR_FUTURE_EXPIRY = '2030-01-01';
+
 export const CREW_PRESET_6 = {
   id: 'crew_6_welding_hvac',
   label: '6-Worker Crew (Welding & HVAC Team)',
   workers: [
-    { name: 'Rashid Mahmood', emiratesId: '784-1988-3482190-1', trade: 'Lead Certified TIG Welder (Class 1)', role: 'Team Lead & Welder', phone: '+971 50 842 1928' },
-    { name: 'Suresh Kumar', emiratesId: '784-1992-7718294-3', trade: 'Senior Mechanical Fitter', role: 'Mechanical Tech', phone: '+971 52 119 4832' },
-    { name: 'Bilal Khan', emiratesId: '784-1995-1049281-9', trade: 'Certified Fire Watch Sentinel', role: 'Fire Watch Guard', phone: '+971 55 382 9104' },
-    { name: 'Farhan Akhtar', emiratesId: '784-1991-6629104-5', trade: 'HVAC Duct & Damper Specialist', role: 'HVAC Tech', phone: '+971 50 771 2893' },
-    { name: 'Amit Patel', emiratesId: '784-1996-3381902-7', trade: 'Electrical & Controls Technician', role: 'Electrical Tech', phone: '+971 54 991 4302' },
-    { name: 'Zayd Al Nuaimi', emiratesId: '784-1997-5501984-2', trade: 'Safety Assistant & Site Helper', role: 'Assistant', phone: '+971 56 220 8419' },
+    { name: 'Rashid Mahmood', emiratesId: '784-1988-3482190-1', expiryDate: FAR_FUTURE_EXPIRY, trade: 'Lead Certified TIG Welder (Class 1)', role: 'Team Lead & Welder', phone: '+971 50 842 1928' },
+    { name: 'Suresh Kumar', emiratesId: '784-1992-7718294-3', expiryDate: FAR_FUTURE_EXPIRY, trade: 'Senior Mechanical Fitter', role: 'Mechanical Tech', phone: '+971 52 119 4832' },
+    { name: 'Bilal Khan', emiratesId: '784-1995-1049281-9', expiryDate: FAR_FUTURE_EXPIRY, trade: 'Certified Fire Watch Sentinel', role: 'Fire Watch Guard', phone: '+971 55 382 9104' },
+    { name: 'Farhan Akhtar', emiratesId: '784-1991-6629104-5', expiryDate: FAR_FUTURE_EXPIRY, trade: 'HVAC Duct & Damper Specialist', role: 'HVAC Tech', phone: '+971 50 771 2893' },
+    { name: 'Amit Patel', emiratesId: '784-1996-3381902-7', expiryDate: FAR_FUTURE_EXPIRY, trade: 'Electrical & Controls Technician', role: 'Electrical Tech', phone: '+971 54 991 4302' },
+    { name: 'Zayd Al Nuaimi', emiratesId: '784-1997-5501984-2', expiryDate: FAR_FUTURE_EXPIRY, trade: 'Safety Assistant & Site Helper', role: 'Assistant', phone: '+971 56 220 8419' },
   ],
 };
 
@@ -77,13 +93,31 @@ export const CREW_PRESET_5 = {
   id: 'crew_5_rigger',
   label: '5-Worker Crew (High-Elevation Rigger Team)',
   workers: [
-    { name: 'Jean-Luc Bernard', emiratesId: '784-1985-2207713-6', trade: 'Project Supervisor / IRATA Level 3', role: 'Supervisor', phone: '+971 50 334 8821' },
-    { name: 'Arjun Verma', emiratesId: '784-1993-4471820-2', trade: 'IRATA Level 2 Facade Rigger', role: 'Rigger', phone: '+971 52 902 1147' },
-    { name: 'Mohammed Zayed', emiratesId: '784-1990-6693281-8', trade: 'Certified Scaffold Inspector', role: 'Scaffold Inspector', phone: '+971 55 610 3392' },
-    { name: 'Carlos Mendoza', emiratesId: '784-1994-8817402-4', trade: 'High-Elevation Structural Welder', role: 'Welder', phone: '+971 54 228 7765' },
-    { name: "David O'Connor", emiratesId: '784-1989-1129384-0', trade: 'Safety & Fall Arrest Sentinel', role: 'Safety Sentinel', phone: '+971 56 447 9931' },
+    { name: 'Jean-Luc Bernard', emiratesId: '784-1985-2207713-6', expiryDate: FAR_FUTURE_EXPIRY, trade: 'Project Supervisor / IRATA Level 3', role: 'Supervisor', phone: '+971 50 334 8821' },
+    { name: 'Arjun Verma', emiratesId: '784-1993-4471820-2', expiryDate: FAR_FUTURE_EXPIRY, trade: 'IRATA Level 2 Facade Rigger', role: 'Rigger', phone: '+971 52 902 1147' },
+    { name: 'Mohammed Zayed', emiratesId: '784-1990-6693281-8', expiryDate: FAR_FUTURE_EXPIRY, trade: 'Certified Scaffold Inspector', role: 'Scaffold Inspector', phone: '+971 55 610 3392' },
+    { name: 'Carlos Mendoza', emiratesId: '784-1994-8817402-4', expiryDate: FAR_FUTURE_EXPIRY, trade: 'High-Elevation Structural Welder', role: 'Welder', phone: '+971 54 228 7765' },
+    { name: "David O'Connor", emiratesId: '784-1989-1129384-0', expiryDate: FAR_FUTURE_EXPIRY, trade: 'Safety & Fall Arrest Sentinel', role: 'Safety Sentinel', phone: '+971 56 447 9931' },
   ],
 };
+
+// Emirates ID validation: format check + expiry check. Used both after OCR
+// scanning and for manually-entered workers, so every worker goes through
+// the same gate before a permit can be submitted.
+const EMIRATES_ID_PATTERN = /^784-\d{4}-\d{7}-\d$/;
+
+export function validateWorkerId(worker) {
+  const id = (worker.emiratesId || '').trim();
+  if (!id) return { valid: false, reason: 'Emirates ID required' };
+  if (!EMIRATES_ID_PATTERN.test(id)) return { valid: false, reason: 'Invalid Emirates ID format' };
+  if (worker.expiryDate) {
+    const expiry = new Date(`${worker.expiryDate}T23:59:59`);
+    if (expiry.getTime() < Date.now()) return { valid: false, reason: 'Emirates ID expired' };
+  } else {
+    return { valid: false, reason: 'Expiry date required' };
+  }
+  return { valid: true, reason: '' };
+}
 
 export const CREW_PRESETS = [CREW_PRESET_6, CREW_PRESET_5];
 
@@ -109,12 +143,13 @@ export const INITIAL_PERMITS = [
     startDate: '2026-08-30',
     endDate: '2026-09-02',
     durationDays: 4,
-    startTime: '08:00',
+    permitTimeType: 'day',
+    startTime: '10:00',
     endTime: '17:00',
-    dailySchedule: generateDailySchedule('2026-08-30', '2026-09-02', '08:00', '17:00'),
+    dailySchedule: generateDailySchedule('2026-08-30', '2026-09-02', '10:00', '17:00'),
     companyName: 'Al Futtaim Engineering LLC',
     mobileNo: '+971 50 842 1928',
-    workLocation: 'Oak Room - Signature Steakhouse Kitchen (Ground Floor, F&B)',
+    workLocation: 'Oak Room',
     descriptionOfWork: 'TIG welding & replacement of secondary exhaust manifold damper section above char-grill line.',
     riskLevel: 'High',
     vehiclePlate: 'Abu Dhabi 5 - 49201',

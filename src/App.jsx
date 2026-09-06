@@ -16,23 +16,27 @@ import {
 import {
   HOTEL_LOCATIONS,
   PERMIT_TYPES,
-  SHIFT_PRESETS,
+  PERMIT_TIME_TYPES,
+  NOISY_PERMIT_TYPE_IDS,
+  TYPE_LOCATION_VALUE,
   DURATION_PRESETS,
   MAX_PERMIT_DAYS,
   CREW_PRESETS,
   generateDailySchedule,
   diffDaysInclusive,
+  validateWorkerId,
 } from './sampleData';
 import {
   FileText, ShieldCheck, Wrench, Clock, Camera, CheckCircle, AlertTriangle, User, Building,
   MapPin, Calendar, Layers, Search, Bell, Check, X, LogIn, RefreshCw, QrCode, Users,
   MessageSquare, Flame, Mountain, Zap, Wind, Phone, Trash2, PenTool, Printer, Mail,
-  Siren, BarChart3, Award, ClipboardList, ChevronRight, Plus, UserCheck, UserX,
+  Siren, BarChart3, Award, ClipboardList, ChevronRight, Plus, UserCheck, UserX, Contrast,
 } from 'lucide-react';
 import Tesseract from 'tesseract.js';
 import { QRCodeCanvas } from 'qrcode.react';
 import { jsPDF } from 'jspdf';
 import confetti from 'canvas-confetti';
+import { savePhoto } from './localPhotos';
 
 // ----------------------------------------------------
 // Shared helpers
@@ -102,6 +106,21 @@ function App() {
   const [activePermitId, setActivePermitId] = useState(null);
   const [gstTime, setGstTime] = useState('');
   const [modal, setModal] = useState(null); // { type, permit? }
+  const [grayscale, setGrayscale] = useState(() => {
+    try {
+      return localStorage.getItem('permit_pro_grayscale') === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('permit_pro_grayscale', grayscale ? '1' : '0');
+    } catch {
+      // ignore — per-viewer convenience only
+    }
+  }, [grayscale]);
 
   useEffect(() => {
     const unsub = subscribePermits(setPermits);
@@ -145,7 +164,7 @@ function App() {
   ];
 
   return (
-    <div className="min-h-screen bg-edition-cream flex flex-col">
+    <div className="min-h-screen bg-edition-cream flex flex-col" style={grayscale ? { filter: 'grayscale(100%)' } : undefined}>
       <header className="bg-edition-950 text-white py-4 px-6 border-b border-edition-gold shadow-md no-print">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -171,6 +190,13 @@ function App() {
               <Users className="h-3.5 w-3.5" />
               {totalOnSiteHeadcount} On Site
             </div>
+            <button
+              onClick={() => setGrayscale((g) => !g)}
+              title="Toggle black-and-white mode"
+              className={`p-2 rounded border transition-all ${grayscale ? 'bg-edition-gold text-edition-black border-edition-gold' : 'bg-edition-charcoal text-edition-gold border-edition-gold/30 hover:border-edition-gold'}`}
+            >
+              <Contrast className="h-4 w-4" />
+            </button>
           </div>
         </div>
 
@@ -223,10 +249,11 @@ function App() {
 function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
   const [startDate, setStartDate] = useState(todayIso());
   const [endDate, setEndDate] = useState(todayIso());
-  const [shiftId, setShiftId] = useState('day');
-  const [startTime, setStartTime] = useState('08:00');
-  const [endTime, setEndTime] = useState('17:00');
+  const [permitTimeTypeId, setPermitTimeTypeId] = useState('day');
+  const [startTime, setStartTime] = useState(PERMIT_TIME_TYPES[0].startTime);
+  const [endTime, setEndTime] = useState(PERMIT_TIME_TYPES[0].endTime);
   const [permitTypeId, setPermitTypeId] = useState('general');
+  const [locationSelectValue, setLocationSelectValue] = useState('');
   const [locationName, setLocationName] = useState('');
   const [companyName, setCompanyName] = useState('');
   const [mobileNo, setMobileNo] = useState('');
@@ -234,7 +261,7 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
   const [descriptionOfWork, setDescriptionOfWork] = useState('');
 
   const [ptw, setPtw] = useState({ hotWork: false, workingAtHeights: false, confinedSpace: false, others: false, othersText: '' });
-  const [documents, setDocuments] = useState({ methodStatement: false, safetyInstruction: false, riskAssessment: false, insuranceDocument: false });
+  const [documents, setDocuments] = useState({ methodStatement: '', safetyInstruction: '', riskAssessment: '', insuranceDocument: '' });
   const [safety, setSafety] = useState({ barriersErected: false, safetySignsAndNotices: false, laddersTiedFooted: false, ventilateTheArea: false, others: '' });
   const [ppe, setPpe] = useState({ safetyFootwear: false, hardHat: false, eyeProtection: false, handProtection: false, earProtection: false, fallArrestSystem: false, others: '' });
 
@@ -254,16 +281,28 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
   const selectedLocation = HOTEL_LOCATIONS.find((l) => l.name === locationName);
   const selectedType = PERMIT_TYPES.find((t) => t.id === permitTypeId);
   const riskLevel = selectedType?.defaultRisk === 'High' || selectedLocation?.riskLevel === 'High' ? 'High' : 'Regular';
+  const availablePermitTypes = permitTimeTypeId === 'night'
+    ? PERMIT_TYPES.filter((t) => !NOISY_PERMIT_TYPE_IDS.includes(t.id))
+    : PERMIT_TYPES;
 
-  const applyShift = (id) => {
-    const s = SHIFT_PRESETS.find((p) => p.id === id);
-    if (!s) return;
-    setShiftId(id);
-    setStartTime(s.startTime);
-    setEndTime(s.endTime);
+  const applyPermitTimeType = (id) => {
+    const t = PERMIT_TIME_TYPES.find((p) => p.id === id);
+    if (!t) return;
+    setPermitTimeTypeId(id);
+    setStartTime(t.startTime);
+    setEndTime(t.endTime);
+    if (id === 'night' && NOISY_PERMIT_TYPE_IDS.includes(permitTypeId)) {
+      setPermitTypeId('general');
+    }
   };
 
   const applyDurationPreset = (days) => {
+    if (days === 1) {
+      const today = todayIso();
+      setStartDate(today);
+      setEndDate(today);
+      return;
+    }
     const start = new Date(`${startDate}T00:00:00`);
     const end = new Date(start);
     end.setDate(end.getDate() + (days - 1));
@@ -272,11 +311,21 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
 
   const setToMax = () => applyDurationPreset(MAX_PERMIT_DAYS);
 
+  const handleLocationSelect = (value) => {
+    setLocationSelectValue(value);
+    if (value === TYPE_LOCATION_VALUE) {
+      setLocationName('');
+    } else {
+      setLocationName(value);
+    }
+  };
+
   const applyCrewPreset = (preset) => {
     setWorkers(preset.workers.map((w, i) => ({
       id: `w-${Date.now()}-${i}`,
       ...w,
       badgeNo: '',
+      localPhotoId: null,
       isCheckedIn: false,
       checkInTime: null,
       checkOutTime: null,
@@ -285,8 +334,8 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
 
   const addBlankWorker = () => {
     setWorkers((prev) => [...prev, {
-      id: `w-${Date.now()}`, name: '', emiratesId: '', trade: '', role: '', phone: '', badgeNo: '',
-      isCheckedIn: false, checkInTime: null, checkOutTime: null,
+      id: `w-${Date.now()}`, name: '', emiratesId: '', expiryDate: '', trade: '', role: '', phone: '', badgeNo: '',
+      localPhotoId: null, isCheckedIn: false, checkInTime: null, checkOutTime: null,
     }]);
   };
 
@@ -295,6 +344,27 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
   };
 
   const removeWorker = (id) => setWorkers((prev) => prev.filter((w) => w.id !== id));
+
+  // Extracts an Emirates ID number (784-YYYY-NNNNNNN-C) and an expiry date
+  // from raw OCR text. Emirates ID cards print the expiry as DD/MM/YYYY,
+  // usually on the line labeled "Expiry Date" / "Date of Expiry".
+  function parseEmiratesIdText(rawText) {
+    const idMatch = rawText.match(/784[\s-]?\d{4}[\s-]?\d{7}[\s-]?\d/);
+    const emiratesId = idMatch ? idMatch[0].replace(/[\s]/g, '').replace(/^(\d{3})-?(\d{4})-?(\d{7})-?(\d)$/, '$1-$2-$3-$4') : '';
+
+    const lines = rawText.split('\n').map((l) => l.trim()).filter(Boolean);
+    let expiryDate = '';
+    for (let i = 0; i < lines.length; i++) {
+      if (/expiry/i.test(lines[i])) {
+        const dateMatch = (lines[i] + ' ' + (lines[i + 1] || '')).match(/(\d{2})[/.-](\d{2})[/.-](\d{4})/);
+        if (dateMatch) {
+          expiryDate = `${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}`;
+        }
+        break;
+      }
+    }
+    return { emiratesId, expiryDate };
+  }
 
   const handleOcrScan = async (e) => {
     const file = e.target.files[0];
@@ -305,7 +375,8 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
       const result = await Tesseract.recognize(file, 'eng', {
         logger: (m) => { if (m.status === 'recognizing text') setOcrProgress(Math.round(m.progress * 100)); },
       });
-      const lines = result.data.text.split('\n').map((l) => l.trim()).filter(Boolean);
+      const rawText = result.data.text;
+      const lines = rawText.split('\n').map((l) => l.trim()).filter(Boolean);
       let parsedName = '';
       for (let i = 0; i < lines.length; i++) {
         if (/name/i.test(lines[i])) {
@@ -314,9 +385,20 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
         }
       }
       if (!parsedName) parsedName = lines.find((l) => l.length > 5 && !/\d/.test(l)) || 'Unnamed Worker';
+      const { emiratesId, expiryDate } = parseEmiratesIdText(rawText);
+
+      const workerId = `w-${Date.now()}`;
+      // Keep the actual card image on this device only — never uploaded to
+      // Supabase — so it doesn't eat into the shared database's storage.
+      try {
+        await savePhoto(workerId, file);
+      } catch (photoErr) {
+        console.error('Could not save ID photo locally:', photoErr);
+      }
+
       setWorkers((prev) => [...prev, {
-        id: `w-${Date.now()}`, name: parsedName, emiratesId: '', trade: '', role: 'Worker', phone: '', badgeNo: '',
-        isCheckedIn: false, checkInTime: null, checkOutTime: null,
+        id: workerId, name: parsedName, emiratesId, expiryDate, trade: '', role: 'Worker', phone: '', badgeNo: '',
+        localPhotoId: workerId, isCheckedIn: false, checkInTime: null, checkOutTime: null,
       }]);
     } catch (err) {
       console.error(err);
@@ -327,23 +409,30 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
     }
   };
 
-  const canSubmit = !overMax && locationName && companyName && mobileNo && descriptionOfWork && workers.length > 0 && confirmed && repName;
+  const workerValidity = workers.map((w) => validateWorkerId(w));
+  const hasInvalidWorker = workerValidity.some((v) => !v.valid);
+
+  const canSubmit = !overMax && locationName && companyName && mobileNo && descriptionOfWork && workers.length > 0 && !hasInvalidWorker && confirmed && repName;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (hasInvalidWorker) {
+      alert('One or more workers have an invalid or expired Emirates ID. Fix or remove them before submitting.');
+      return;
+    }
     if (!canSubmit) {
       alert('Please complete all required sections, add at least one worker, and confirm the contractor declaration.');
       return;
     }
     const permitData = {
-      startDate, endDate, durationDays, startTime, endTime, dailySchedule,
+      startDate, endDate, durationDays, permitTimeType: permitTimeTypeId, startTime, endTime, dailySchedule,
       companyName, mobileNo, workLocation: locationName, descriptionOfWork, riskLevel, vehiclePlate,
       permitToWork: { ...ptw, hotWork: permitTypeId === 'hot_work' || ptw.hotWork, workingAtHeights: permitTypeId === 'heights' || ptw.workingAtHeights, confinedSpace: permitTypeId === 'confined_space' || ptw.confinedSpace },
       documents: {
-        methodStatement: documents.methodStatement ? 'YES' : 'NO',
-        safetyInstruction: documents.safetyInstruction ? 'YES' : 'NO',
-        riskAssessment: documents.riskAssessment ? 'YES' : 'NO',
-        insuranceDocument: documents.insuranceDocument ? 'YES' : 'NO',
+        methodStatement: documents.methodStatement || 'NO',
+        safetyInstruction: documents.safetyInstruction || 'NO',
+        riskAssessment: documents.riskAssessment || 'NO',
+        insuranceDocument: documents.insuranceDocument || 'NO',
       },
       safetyPrecautions: safety,
       ppe,
@@ -393,8 +482,8 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
           <div className="flex flex-wrap gap-2 mt-3">
             {DURATION_PRESETS.map((d) => (
               <button type="button" key={d} onClick={() => applyDurationPreset(d)}
-                className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider border border-edition-gold/40 rounded hover:border-edition-gold bg-edition-cream text-edition-black">
-                {d} Day{d > 1 ? 's' : ''}{d === MAX_PERMIT_DAYS ? ' (Max 1 Wk)' : ''}
+                className={`px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider border rounded hover:border-edition-gold ${d === 1 ? 'bg-edition-gold text-edition-black border-edition-gold' : 'bg-edition-cream text-edition-black border-edition-gold/40'}`}>
+                {d === 1 ? 'Today' : `${d} Days`}{d === MAX_PERMIT_DAYS ? ' (Max 1 Wk)' : ''}
               </button>
             ))}
           </div>
@@ -407,21 +496,34 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
           )}
 
           <div className="mt-5">
-            <label className="block text-[11px] font-semibold text-edition-black uppercase tracking-wider mb-1.5">Daily Working Hours *</label>
-            <div className="flex flex-wrap gap-2 mb-2">
-              {SHIFT_PRESETS.map((s) => (
-                <button type="button" key={s.id} onClick={() => applyShift(s.id)}
-                  className={`px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider border rounded ${shiftId === s.id ? 'bg-edition-black text-white border-edition-gold' : 'bg-edition-cream text-edition-black border-edition-gold/30'}`}>
-                  {s.label} ({s.startTime}-{s.endTime})
+            <label className="block text-[11px] font-semibold text-edition-black uppercase tracking-wider mb-1.5">Permit Time Type *</label>
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              {PERMIT_TIME_TYPES.map((t) => (
+                <button type="button" key={t.id} onClick={() => applyPermitTimeType(t.id)}
+                  className={`px-3 py-2.5 text-left rounded border ${permitTimeTypeId === t.id ? 'bg-edition-black text-white border-edition-gold' : 'bg-edition-cream text-edition-black border-edition-gold/30'}`}>
+                  <span className="block text-[11px] font-bold uppercase tracking-wider">{t.label}</span>
+                  <span className={`block text-[10px] mt-0.5 ${permitTimeTypeId === t.id ? 'text-edition-gold' : 'text-gray-500'}`}>{t.hoursLabel}</span>
                 </button>
               ))}
             </div>
+
+            {permitTimeTypeId === 'night' && (
+              <div className="bg-amber-50 border border-amber-300 text-amber-800 rounded p-2.5 text-[11px] mb-2 flex items-center gap-1.5">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                Night Work Permit — noisy or hot work is not permitted at night. Noisy work must be scheduled on a Day Permit (10:00 AM – 5:00 PM).
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-3">
               <Field label="Daily Start Time">
-                <input type="time" value={startTime} onChange={(e) => { setStartTime(e.target.value); setShiftId(''); }} className={inputCls} />
+                <input type="time" value={startTime} disabled={permitTimeTypeId === 'day'}
+                  onChange={(e) => setStartTime(e.target.value)}
+                  className={`${inputCls} ${permitTimeTypeId === 'day' ? 'opacity-60 cursor-not-allowed' : ''}`} />
               </Field>
               <Field label="Daily End Time">
-                <input type="time" value={endTime} onChange={(e) => { setEndTime(e.target.value); setShiftId(''); }} className={inputCls} />
+                <input type="time" value={endTime} disabled={permitTimeTypeId === 'day'}
+                  onChange={(e) => setEndTime(e.target.value)}
+                  className={`${inputCls} ${permitTimeTypeId === 'day' ? 'opacity-60 cursor-not-allowed' : ''}`} />
               </Field>
             </div>
           </div>
@@ -443,10 +545,21 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
 
           <div className="grid md:grid-cols-2 gap-3 mt-5">
             <Field label="Location of Work *">
-              <select required value={locationName} onChange={(e) => setLocationName(e.target.value)} className={inputCls}>
+              <select required={locationSelectValue !== TYPE_LOCATION_VALUE} value={locationSelectValue} onChange={(e) => handleLocationSelect(e.target.value)} className={inputCls}>
                 <option value="">Select location inside the hotel...</option>
+                <option value={TYPE_LOCATION_VALUE}>✎ Type location manually...</option>
                 {HOTEL_LOCATIONS.map((l) => <option key={l.name} value={l.name}>{l.name}</option>)}
               </select>
+              {locationSelectValue === TYPE_LOCATION_VALUE && (
+                <input
+                  autoFocus
+                  required
+                  value={locationName}
+                  onChange={(e) => setLocationName(e.target.value)}
+                  placeholder="Type the exact location..."
+                  className={`${inputCls} mt-2`}
+                />
+              )}
             </Field>
             <Field label="Contracting Company *">
               <input required value={companyName} onChange={(e) => setCompanyName(e.target.value)} placeholder="e.g. Al Futtaim Engineering LLC" className={inputCls} />
@@ -462,7 +575,7 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
           <div className="mt-3">
             <label className="block text-[11px] font-semibold text-edition-black uppercase tracking-wider mb-2">Permit Category</label>
             <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-              {PERMIT_TYPES.map((t) => (
+              {availablePermitTypes.map((t) => (
                 <button type="button" key={t.id} onClick={() => setPermitTypeId(t.id)}
                   className={`py-2 px-1 text-center rounded border text-[10px] font-semibold uppercase tracking-wider ${permitTypeId === t.id ? 'bg-edition-black text-edition-cream border-edition-gold' : 'bg-edition-cream text-edition-black border-edition-gold/25'}`}>
                   {t.label}
@@ -492,11 +605,11 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
 
         {/* SECTION 5: Documentation Verification */}
         <Section title="5 · Documentation Verification" icon={ClipboardList}>
-          <div className="grid grid-cols-2 gap-2">
-            <Checkbox label="Method Statement" checked={documents.methodStatement} onChange={(v) => setDocuments({ ...documents, methodStatement: v })} />
-            <Checkbox label="Safety Instruction" checked={documents.safetyInstruction} onChange={(v) => setDocuments({ ...documents, safetyInstruction: v })} />
-            <Checkbox label="Risk Assessment" checked={documents.riskAssessment} onChange={(v) => setDocuments({ ...documents, riskAssessment: v })} />
-            <Checkbox label="Insurance Document" checked={documents.insuranceDocument} onChange={(v) => setDocuments({ ...documents, insuranceDocument: v })} />
+          <div className="space-y-2">
+            <TriStateField label="Method Statement" value={documents.methodStatement} onChange={(v) => setDocuments({ ...documents, methodStatement: v })} />
+            <TriStateField label="Safety Instruction" value={documents.safetyInstruction} onChange={(v) => setDocuments({ ...documents, safetyInstruction: v })} />
+            <TriStateField label="Risk Assessment" value={documents.riskAssessment} onChange={(v) => setDocuments({ ...documents, riskAssessment: v })} />
+            <TriStateField label="Insurance Document" value={documents.insuranceDocument} onChange={(v) => setDocuments({ ...documents, insuranceDocument: v })} />
           </div>
         </Section>
 
@@ -553,19 +666,35 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal }) {
             <p className="text-xs text-gray-500 italic">No workers added yet. Use a crew preset, scan an Emirates ID, or add one manually.</p>
           ) : (
             <div className="space-y-2">
-              {workers.map((w, i) => (
-                <div key={w.id} className="grid grid-cols-12 gap-2 items-center bg-edition-cream/50 border border-edition-gold/15 rounded p-2">
-                  <span className="col-span-1 text-[10px] font-bold text-gray-400 text-center">#{i + 1}</span>
-                  <input value={w.name} onChange={(e) => updateWorker(w.id, 'name', e.target.value)} placeholder="Full name" className="col-span-3 bg-white border border-edition-gold/20 rounded px-2 py-1.5 text-xs" />
-                  <input value={w.emiratesId} onChange={(e) => updateWorker(w.id, 'emiratesId', e.target.value)} placeholder="784-XXXX-XXXXXXX-X" className="col-span-2 bg-white border border-edition-gold/20 rounded px-2 py-1.5 text-xs" />
-                  <input value={w.trade} onChange={(e) => updateWorker(w.id, 'trade', e.target.value)} placeholder="Trade / Specialization" className="col-span-3 bg-white border border-edition-gold/20 rounded px-2 py-1.5 text-xs" />
-                  <input value={w.role} onChange={(e) => updateWorker(w.id, 'role', e.target.value)} placeholder="Role" className="col-span-2 bg-white border border-edition-gold/20 rounded px-2 py-1.5 text-xs" />
-                  <button type="button" onClick={() => removeWorker(w.id)} className="col-span-1 text-red-500 hover:text-red-700 flex justify-center"><Trash2 className="h-4 w-4" /></button>
-                </div>
-              ))}
+              {workers.map((w, i) => {
+                const validity = validateWorkerId(w);
+                return (
+                  <div key={w.id} className={`rounded p-2 border ${validity.valid ? 'bg-edition-cream/50 border-edition-gold/15' : 'bg-red-50 border-red-300'}`}>
+                    <div className="grid grid-cols-12 gap-2 items-center">
+                      <span className="col-span-1 text-[10px] font-bold text-gray-400 text-center">#{i + 1}</span>
+                      <input value={w.name} onChange={(e) => updateWorker(w.id, 'name', e.target.value)} placeholder="Full name" className="col-span-3 bg-white border border-edition-gold/20 rounded px-2 py-1.5 text-xs" />
+                      <input value={w.emiratesId} onChange={(e) => updateWorker(w.id, 'emiratesId', e.target.value)} placeholder="784-XXXX-XXXXXXX-X" className={`col-span-2 bg-white border rounded px-2 py-1.5 text-xs ${validity.valid ? 'border-edition-gold/20' : 'border-red-400 text-red-700'}`} />
+                      <input type="date" value={w.expiryDate || ''} onChange={(e) => updateWorker(w.id, 'expiryDate', e.target.value)} title="Emirates ID expiry date" className={`col-span-2 bg-white border rounded px-2 py-1.5 text-xs ${validity.valid ? 'border-edition-gold/20' : 'border-red-400 text-red-700'}`} />
+                      <input value={w.trade} onChange={(e) => updateWorker(w.id, 'trade', e.target.value)} placeholder="Trade" className="col-span-2 bg-white border border-edition-gold/20 rounded px-2 py-1.5 text-xs" />
+                      <input value={w.role} onChange={(e) => updateWorker(w.id, 'role', e.target.value)} placeholder="Role" className="col-span-1 bg-white border border-edition-gold/20 rounded px-2 py-1.5 text-xs" />
+                      <button type="button" onClick={() => removeWorker(w.id)} className="col-span-1 text-red-500 hover:text-red-700 flex justify-center"><Trash2 className="h-4 w-4" /></button>
+                    </div>
+                    {!validity.valid && (
+                      <div className="flex items-center gap-1.5 text-[10px] font-bold text-red-700 uppercase tracking-wider mt-1.5 ml-8">
+                        <AlertTriangle className="h-3 w-3" /> {validity.reason} — cannot submit until fixed or removed.
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
           <p className="text-[10px] text-gray-500 mt-2">{workers.length} worker(s) registered on this permit.</p>
+          {hasInvalidWorker && (
+            <div className="mt-2 bg-red-50 border border-red-300 text-red-800 rounded p-2.5 text-[11px] font-semibold flex items-center gap-1.5">
+              <AlertTriangle className="h-4 w-4 shrink-0" /> One or more Emirates IDs are invalid or expired. Submission is blocked until every worker has a valid, unexpired ID.
+            </div>
+          )}
         </Section>
 
         {/* SECTION 7: Contractor Confirmation */}
@@ -616,6 +745,37 @@ function Checkbox({ label, checked, onChange, icon: Icon }) {
       {Icon && <Icon className={`h-3.5 w-3.5 ${checked ? 'text-edition-gold' : 'text-gray-400'}`} />}
       {label}
     </label>
+  );
+}
+
+function TriStateField({ label, value, onChange }) {
+  const options = [
+    { id: 'YES', label: 'Yes' },
+    { id: 'NO', label: 'No' },
+    { id: 'N_A', label: 'N/A' },
+  ];
+  return (
+    <div className="flex items-center justify-between gap-3 bg-edition-cream/50 border border-edition-gold/15 rounded px-3 py-2">
+      <span className="text-xs font-medium text-edition-black">{label}</span>
+      <div className="flex gap-1">
+        {options.map((opt) => (
+          <button
+            key={opt.id}
+            type="button"
+            onClick={() => onChange(opt.id)}
+            className={`px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider rounded border ${
+              value === opt.id
+                ? opt.id === 'YES' ? 'bg-green-600 text-white border-green-600'
+                : opt.id === 'NO' ? 'bg-red-600 text-white border-red-600'
+                : 'bg-gray-500 text-white border-gray-500'
+                : 'bg-white text-edition-black border-edition-gold/25'
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

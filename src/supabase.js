@@ -28,6 +28,7 @@ const CAMEL_TO_SNAKE = {
   formRef: 'form_ref',
   releaseDate: 'release_date',
   revisionNo: 'revision_no',
+  permitTimeType: 'permit_time_type',
   startDate: 'start_date',
   endDate: 'end_date',
   durationDays: 'duration_days',
