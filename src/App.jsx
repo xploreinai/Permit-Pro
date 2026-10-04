@@ -39,6 +39,7 @@ import { QRCodeCanvas } from 'qrcode.react';
 import { jsPDF } from 'jspdf';
 import confetti from 'canvas-confetti';
 import { savePhoto } from './localPhotos';
+import { requestApprovalEmails, describeApprovalResult } from './approvalApi';
 
 // ----------------------------------------------------
 // Shared helpers
@@ -73,6 +74,7 @@ function crewSizeOf(permit) {
 function statusLabel(status) {
   const map = {
     pending_receipt: 'Pending Supervisor Receipt (Sec. 8)',
+    rejected: 'Rejected — see reason below',
     pending_checkin: 'Authorized — Awaiting Gate 3 Check-In',
     active: 'Active On Site',
     pending_completion_ack: 'Work Completed — Awaiting Engineering Acknowledgment',
@@ -86,6 +88,7 @@ function statusLabel(status) {
 function statusBadgeClass(status) {
   const map = {
     pending_receipt: 'bg-blue-50 text-blue-700 border-blue-200',
+    rejected: 'bg-red-50 text-red-700 border-red-200',
     pending_checkin: 'bg-amber-50 text-amber-700 border-amber-200',
     active: 'bg-green-50 text-green-700 border-green-200',
     pending_completion_ack: 'bg-teal-50 text-teal-700 border-teal-200',
@@ -421,6 +424,7 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal, assisted
   const [repName, setRepName] = useState('');
   const [signatureData, setSignatureData] = useState('');
   const [confirmed, setConfirmed] = useState(false);
+  const [emailNote, setEmailNote] = useState('');
 
   const durationDays = diffDaysInclusive(startDate, endDate);
   const overMax = durationDays > MAX_PERMIT_DAYS;
@@ -605,6 +609,8 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal, assisted
       });
       setActivePermitId(created.id);
       if (clearAssist) clearAssist();
+      // Email is an extra channel: never block or fail the submission because of it.
+      requestApprovalEmails(created.id).then((result) => setEmailNote(result.ok ? describeApprovalResult(result) : ''));
     } catch (err) {
       console.error(err);
       alert('Submission failed. Check the console for details.');
@@ -612,7 +618,7 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal, assisted
   };
 
   if (activePermit) {
-    return <VendorPermitStatusCard permit={activePermit} onReset={() => setActivePermitId(null)} openModal={openModal} />;
+    return <VendorPermitStatusCard permit={activePermit} onReset={() => { setActivePermitId(null); setEmailNote(''); }} openModal={openModal} emailNote={emailNote} />;
   }
 
   return (
@@ -1010,7 +1016,7 @@ function SignaturePad({ label, onChange, className = '' }) {
 // ----------------------------------------------------
 // Vendor's live permit status card
 // ----------------------------------------------------
-function VendorPermitStatusCard({ permit, onReset, openModal }) {
+function VendorPermitStatusCard({ permit, onReset, openModal, emailNote }) {
   const [marking, setMarking] = useState(false);
   const { done, total } = dayProgress(permit);
   const resuming = permit.status === 'pending_checkin' && hasResumedBefore(permit);
@@ -1041,12 +1047,26 @@ function VendorPermitStatusCard({ permit, onReset, openModal }) {
 
       <div className={`border rounded-md py-3 px-4 mb-4 flex flex-col items-center ${statusBadgeClass(permit.status)}`}>
         <span className="flex items-center gap-1.5 font-semibold text-sm uppercase tracking-wide">
-          {permit.status === 'active' ? <CheckCircle className="h-5 w-5" /> : <RefreshCw className="h-4 w-4 animate-spin" />}
+          {permit.status === 'active' ? <CheckCircle className="h-5 w-5" /> : permit.status === 'rejected' ? <ShieldAlert className="h-5 w-5" /> : <RefreshCw className="h-4 w-4 animate-spin" />}
           {resuming ? 'Valid Permit — Ready to Resume at Gate 3' : statusLabel(permit.status)}
         </span>
       </div>
 
-      {permit.hccApproval?.required && (
+      {permit.status === 'rejected' && (
+        <div className="border border-red-300 bg-red-50 text-red-800 rounded-md py-2.5 px-4 mb-4 text-xs text-left">
+          <strong className="uppercase tracking-wide">Not approved.</strong>{' '}
+          {permit.hccApproval?.rejected
+            ? `The HCC Manager rejected this permit${permit.hccApproval.notes ? `: ${permit.hccApproval.notes}` : '.'}`
+            : `Engineering rejected this permit${permit.departmentReceipt?.notes ? `: ${permit.departmentReceipt.notes}` : '.'}`}
+          {' '}Please fix the issue and submit a new application.
+        </div>
+      )}
+
+      {emailNote && permit.status === 'pending_receipt' && (
+        <p className="text-[11px] text-gray-500 mb-4">✉ {emailNote}</p>
+      )}
+
+      {permit.hccApproval?.required && permit.status !== 'rejected' && (
         <div className={`border rounded-md py-2.5 px-4 mb-6 text-xs font-semibold flex items-center justify-center gap-1.5 ${permit.hccApproval.approved ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-300 text-red-800'}`}>
           <ShieldAlert className="h-4 w-4 shrink-0" />
           {permit.hccApproval.approved
@@ -1287,6 +1307,11 @@ function SupervisorHubView({ permits, openModal, onAssist }) {
               <PermitGateCard key={permit.id} permit={permit}>
                 <button onClick={() => setSection8Permit(permit)} className="w-full bg-edition-gold hover:bg-edition-darkGold text-edition-black font-bold text-xs uppercase tracking-widest py-3 px-4 rounded border border-edition-gold">
                   Review &amp; Authorize (Sec. 8)
+                </button>
+                <button
+                  onClick={async () => alert(describeApprovalResult(await requestApprovalEmails(permit.id)))}
+                  className="w-full mt-2 flex items-center justify-center gap-1.5 bg-white border border-edition-gold/40 text-edition-black text-[11px] uppercase tracking-wider py-2 rounded">
+                  <Mail className="h-3.5 w-3.5" /> Email / Resend Approval Request
                 </button>
               </PermitGateCard>
             ))}
