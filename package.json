@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test:server": "node --test server/test/approvals.test.js"
+    "test:server": "node --test server/test/approvals.test.js src/permitDates.test.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

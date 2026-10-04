@@ -30,39 +30,23 @@ export const PERMIT_TIME_TYPES = [
   { id: 'night', label: 'Night Work Permit', hoursLabel: 'Custom night hours', startTime: '18:00', endTime: '06:00', fixed: false },
 ];
 
-export const DURATION_PRESETS = [1, 2, 3, 4, 5, 7];
-export const MAX_PERMIT_DAYS = 7;
-
 // PLACEHOLDER — replace with the real HCC Manager's email address.
 export const HCC_MANAGER_EMAIL = 'hcc.manager@theeditionhotels.com';
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-export function generateDailySchedule(startDate, endDate, startTime, endTime) {
-  if (!startDate || !endDate) return [];
-  const schedule = [];
-  const start = new Date(`${startDate}T00:00:00`);
-  const end = new Date(`${endDate}T00:00:00`);
-  let dayNumber = 1;
-  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-    schedule.push({
-      dayNumber,
-      date: d.toISOString().split('T')[0],
-      dayName: DAY_NAMES[d.getDay()],
-      startTime,
-      endTime,
-      formattedHours: `${startTime} - ${endTime}`,
-    });
-    dayNumber += 1;
-  }
-  return schedule;
-}
-
-export function diffDaysInclusive(startDate, endDate) {
-  if (!startDate || !endDate) return 0;
-  const start = new Date(`${startDate}T00:00:00`);
-  const end = new Date(`${endDate}T00:00:00`);
-  return Math.round((end - start) / 86400000) + 1;
+// One permit = one day, so the schedule is a single entry. The weekday is read
+// from a UTC-noon date so it can't slip a day on devices in other timezones.
+export function buildDaySchedule(date, startTime, endTime) {
+  if (!date) return [];
+  return [{
+    dayNumber: 1,
+    date,
+    dayName: DAY_NAMES[new Date(`${date}T12:00:00Z`).getUTCDay()],
+    startTime,
+    endTime,
+    formattedHours: `${startTime} - ${endTime}`,
+  }];
 }
 
 // Emirates ID: 784-YYYY-NNNNNNN-C. Expiry is validated separately per worker.
@@ -133,18 +117,17 @@ export const INITIAL_PERMITS = [
     releaseDate: 'February 2024',
     revisionNo: '01',
     startDate: '2026-08-30',
-    endDate: '2026-09-02',
-    durationDays: 4,
+    endDate: '2026-08-30',
+    durationDays: 1,
     permitTimeType: 'day',
     startTime: '10:00',
     endTime: '17:00',
-    dailySchedule: generateDailySchedule('2026-08-30', '2026-09-02', '10:00', '17:00'),
+    dailySchedule: buildDaySchedule('2026-08-30', '10:00', '17:00'),
     companyName: 'Al Futtaim Engineering LLC',
     mobileNo: '+971 50 842 1928',
     workLocation: 'Oak Room',
     descriptionOfWork: 'TIG welding & replacement of secondary exhaust manifold damper section above char-grill line.',
     riskLevel: 'High',
-    vehiclePlate: 'Abu Dhabi 5 - 49201',
     permitToWork: { hotWork: true, workingAtHeights: false, confinedSpace: false, others: false, othersText: '' },
     documents: { methodStatement: 'YES', safetyInstruction: 'YES', riskAssessment: 'YES', insuranceDocument: 'YES' },
     safetyPrecautions: {
@@ -180,7 +163,6 @@ export const INITIAL_PERMITS = [
     cancellation: { isCancelled: false, signedBy: '', date: '', time: '', signatureDataUrl: '' },
     dailyLog: [{ date: '2026-08-30', checkedInAt: '2026-08-30 08:15', checkedOutAt: null }],
     hccApproval: { required: true, approved: true, approvedBy: 'Fatima Al Suwaidi (HCC Manager)', approvedAt: '2026-08-30 08:20', notes: 'Risk assessment received by email and reviewed.' },
-    closureMode: null,
     completionAck: {},
     submittedByStaff: '',
     status: 'active',

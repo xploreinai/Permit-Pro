@@ -19,12 +19,9 @@ import {
   HOTEL_LOCATIONS,
   PERMIT_TIME_TYPES,
   TYPE_LOCATION_VALUE,
-  DURATION_PRESETS,
-  MAX_PERMIT_DAYS,
   CREW_PRESETS,
   HCC_MANAGER_EMAIL,
-  generateDailySchedule,
-  diffDaysInclusive,
+  buildDaySchedule,
   validateWorkerId,
 } from './sampleData';
 import {
@@ -40,6 +37,7 @@ import { jsPDF } from 'jspdf';
 import confetti from 'canvas-confetti';
 import { savePhoto } from './localPhotos';
 import { requestApprovalEmails, describeApprovalResult } from './approvalApi';
+import { todayIso, addDaysIso, dateValidity, permitDateLabel } from './permitDates';
 
 // ----------------------------------------------------
 // Shared helpers
@@ -61,10 +59,6 @@ function isWithinWindow(startTime, endTime, now = new Date()) {
   const endMins = eh * 60 + em;
   if (startMins <= endMins) return nowMins >= startMins && nowMins <= endMins;
   return nowMins >= startMins || nowMins <= endMins; // overnight
-}
-
-function todayIso() {
-  return new Date().toISOString().split('T')[0];
 }
 
 function crewSizeOf(permit) {
@@ -97,19 +91,6 @@ function statusBadgeClass(status) {
     cancelled: 'bg-red-50 text-red-700 border-red-200',
   };
   return map[status] || 'bg-gray-100 text-gray-600 border-gray-200';
-}
-
-// A permit is "resuming" (not its first-ever check-in) once any scheduled
-// day already has a checkedInAt — used to skip re-showing the full
-// first-time approval framing at Gate 3 and on the vendor's status card.
-function hasResumedBefore(permit) {
-  return (permit.dailyLog || []).some((d) => d.checkedInAt);
-}
-
-function dayProgress(permit) {
-  const total = permit.dailySchedule?.length || permit.durationDays || 1;
-  const done = (permit.dailyLog || []).filter((d) => d.checkedOutAt).length;
-  return { done, total };
 }
 
 function fireConfetti() {
@@ -399,8 +380,7 @@ function ShareApplicationModal({ onClose }) {
 // VENDOR PORTAL — Sections 1-7 (permit application)
 // ----------------------------------------------------
 function VendorPortalView({ activePermit, setActivePermitId, openModal, assistedBy, clearAssist }) {
-  const [startDate, setStartDate] = useState(todayIso());
-  const [endDate, setEndDate] = useState(todayIso());
+  const [workDate, setWorkDate] = useState(todayIso());
   const [permitTimeTypeId, setPermitTimeTypeId] = useState('day');
   const [startTime, setStartTime] = useState(PERMIT_TIME_TYPES[0].startTime);
   const [endTime, setEndTime] = useState(PERMIT_TIME_TYPES[0].endTime);
@@ -408,7 +388,6 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal, assisted
   const [locationName, setLocationName] = useState('');
   const [companyName, setCompanyName] = useState('');
   const [mobileNo, setMobileNo] = useState('');
-  const [vehiclePlate, setVehiclePlate] = useState('');
   const [descriptionOfWork, setDescriptionOfWork] = useState('');
 
   const [ptw, setPtw] = useState({ hotWork: false, workingAtHeights: false, confinedSpace: false, others: false, othersText: '' });
@@ -426,9 +405,9 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal, assisted
   const [confirmed, setConfirmed] = useState(false);
   const [emailNote, setEmailNote] = useState('');
 
-  const durationDays = diffDaysInclusive(startDate, endDate);
-  const overMax = durationDays > MAX_PERMIT_DAYS;
-  const dailySchedule = useMemo(() => generateDailySchedule(startDate, endDate, startTime, endTime), [startDate, endDate, startTime, endTime]);
+  // One permit = one day = one session.
+  const dailySchedule = useMemo(() => buildDaySchedule(workDate, startTime, endTime), [workDate, startTime, endTime]);
+  const dateInPast = !workDate || workDate < todayIso();
 
   const selectedLocation = HOTEL_LOCATIONS.find((l) => l.name === locationName);
   const isHighRiskWork = ptw.hotWork || ptw.workingAtHeights || ptw.confinedSpace;
@@ -444,21 +423,6 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal, assisted
       setPtw((prev) => ({ ...prev, hotWork: false }));
     }
   };
-
-  const applyDurationPreset = (days) => {
-    if (days === 1) {
-      const today = todayIso();
-      setStartDate(today);
-      setEndDate(today);
-      return;
-    }
-    const start = new Date(`${startDate}T00:00:00`);
-    const end = new Date(start);
-    end.setDate(end.getDate() + (days - 1));
-    setEndDate(end.toISOString().split('T')[0]);
-  };
-
-  const setToMax = () => applyDurationPreset(MAX_PERMIT_DAYS);
 
   const handleLocationSelect = (value) => {
     setLocationSelectValue(value);
@@ -561,7 +525,7 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal, assisted
   const workerValidity = workers.map((w) => validateWorkerId(w));
   const hasInvalidWorker = workerValidity.some((v) => !v.valid);
 
-  const canSubmit = !overMax && locationName && companyName && mobileNo && descriptionOfWork && workers.length > 0 && !hasInvalidWorker && confirmed && repName;
+  const canSubmit = !dateInPast && locationName && companyName && mobileNo && descriptionOfWork && workers.length > 0 && !hasInvalidWorker && confirmed && repName;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -575,8 +539,8 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal, assisted
     }
     const isHighRisk = riskLevel === 'High';
     const permitData = {
-      startDate, endDate, durationDays, permitTimeType: permitTimeTypeId, startTime, endTime, dailySchedule,
-      companyName, mobileNo, workLocation: locationName, descriptionOfWork, riskLevel, vehiclePlate,
+      startDate: workDate, endDate: workDate, durationDays: 1, permitTimeType: permitTimeTypeId, startTime, endTime, dailySchedule,
+      companyName, mobileNo, workLocation: locationName, descriptionOfWork, riskLevel,
       permitToWork: ptw,
       documents: {
         methodStatement: documents.methodStatement || 'NO',
@@ -592,7 +556,6 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal, assisted
       cancellation: { isCancelled: false, signedBy: '', date: '', time: '', signatureDataUrl: '' },
       dailyLog: dailySchedule.map((d) => ({ date: d.date, checkedInAt: null, checkedOutAt: null })),
       hccApproval: { required: isHighRisk, approved: false, approvedBy: '', approvedAt: '', notes: '' },
-      closureMode: null,
       completionAck: {},
       submittedByStaff: assistedBy || '',
       status: 'pending_receipt',
@@ -650,30 +613,25 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal, assisted
 
         {/* SECTION 1-3: Validity, Hours, Particulars */}
         <Section title="1-3 · When and Where" icon={Calendar}>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Start Date *">
-              <input type="date" required value={startDate} onChange={(e) => setStartDate(e.target.value)} className={inputCls} />
-            </Field>
-            <Field label="End Date *">
-              <input type="date" required value={endDate} min={startDate} onChange={(e) => setEndDate(e.target.value)} className={inputCls} />
-            </Field>
+          <Field label="Date of Work * (one permit = one day)">
+            <input type="date" required value={workDate} min={todayIso()} onChange={(e) => setWorkDate(e.target.value)} className={inputCls} />
+          </Field>
+          <div className="flex gap-2 mt-3">
+            <button type="button" onClick={() => setWorkDate(todayIso())}
+              className={`px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider border rounded ${workDate === todayIso() ? 'bg-edition-gold text-edition-black border-edition-gold' : 'bg-edition-cream text-edition-black border-edition-gold/40'}`}>
+              Today
+            </button>
+            <button type="button" onClick={() => setWorkDate(addDaysIso(todayIso(), 1))}
+              className={`px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider border rounded ${workDate === addDaysIso(todayIso(), 1) ? 'bg-edition-gold text-edition-black border-edition-gold' : 'bg-edition-cream text-edition-black border-edition-gold/40'}`}>
+              Tomorrow
+            </button>
           </div>
-
-          <div className="flex flex-wrap gap-2 mt-3">
-            {DURATION_PRESETS.map((d) => (
-              <button type="button" key={d} onClick={() => applyDurationPreset(d)}
-                className={`px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider border rounded hover:border-edition-gold ${d === 1 ? 'bg-edition-gold text-edition-black border-edition-gold' : 'bg-edition-cream text-edition-black border-edition-gold/40'}`}>
-                {d === 1 ? 'Today' : `${d} Days`}{d === MAX_PERMIT_DAYS ? ' (Max 1 Wk)' : ''}
-              </button>
-            ))}
-          </div>
-
-          {overMax && (
-            <div className="mt-3 bg-red-50 border border-red-300 text-red-800 rounded p-3 text-xs flex items-center justify-between gap-3">
-              <span className="flex items-center gap-1.5 font-semibold"><AlertTriangle className="h-4 w-4" /> Permits cannot exceed {MAX_PERMIT_DAYS} consecutive days ({durationDays} selected).</span>
-              <button type="button" onClick={setToMax} className="bg-red-700 text-white px-3 py-1 rounded text-[10px] font-bold uppercase shrink-0">Set to 7-Day Max</button>
+          {dateInPast && (
+            <div className="mt-3 bg-red-50 border border-red-300 text-red-800 rounded p-3 text-xs font-semibold flex items-center gap-1.5">
+              <AlertTriangle className="h-4 w-4 shrink-0" /> The date has already passed. Please choose today or a later date.
             </div>
           )}
+          <p className="text-[11px] text-gray-500 mt-2">A work permit is valid for one day only. For more days, apply for a new permit each day.</p>
 
           <div className="mt-5">
             <label className="block text-[11px] font-semibold text-edition-black uppercase tracking-wider mb-1.5">Day or Night Work? *</label>
@@ -690,17 +648,17 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal, assisted
             {permitTimeTypeId === 'night' && (
               <div className="bg-amber-50 border border-amber-300 text-amber-800 rounded p-2.5 text-[11px] mb-2 flex items-center gap-1.5">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                Night Work Permit — noisy or hot work is not permitted at night. Noisy work must be scheduled on a Day Permit (10:00 AM – 5:00 PM).
+                Night Work Permit — noisy or hot work is not permitted at night. Noisy work must be scheduled on a Day Permit (10:00 AM – 5:00 PM). A night permit starts on the date above and may run past midnight until the end time.
               </div>
             )}
 
             <div className="grid grid-cols-2 gap-3">
-              <Field label="Daily Start Time">
+              <Field label="Start Time">
                 <input type="time" value={startTime} disabled={permitTimeTypeId === 'day'}
                   onChange={(e) => setStartTime(e.target.value)}
                   className={`${inputCls} ${permitTimeTypeId === 'day' ? 'opacity-60 cursor-not-allowed' : ''}`} />
               </Field>
-              <Field label="Daily End Time">
+              <Field label="End Time">
                 <input type="time" value={endTime} disabled={permitTimeTypeId === 'day'}
                   onChange={(e) => setEndTime(e.target.value)}
                   className={`${inputCls} ${permitTimeTypeId === 'day' ? 'opacity-60 cursor-not-allowed' : ''}`} />
@@ -708,20 +666,9 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal, assisted
             </div>
           </div>
 
-          {dailySchedule.length > 0 && !overMax && (
-            <div className="mt-3 border border-edition-gold/20 rounded overflow-hidden">
-              <table className="w-full text-xs">
-                <thead className="bg-edition-cream uppercase text-[9px] text-gray-500">
-                  <tr><th className="px-3 py-2 text-left">Day</th><th className="px-3 py-2 text-left">Date</th><th className="px-3 py-2 text-left">Working Window</th></tr>
-                </thead>
-                <tbody className="divide-y divide-edition-gold/10">
-                  {dailySchedule.map((d) => (
-                    <tr key={d.dayNumber}><td className="px-3 py-1.5 font-semibold">Day {d.dayNumber} ({d.dayName})</td><td className="px-3 py-1.5">{d.date}</td><td className="px-3 py-1.5 font-mono">{d.formattedHours}</td></tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          <p className="mt-3 text-xs font-semibold text-edition-black bg-edition-cream border border-edition-gold/20 rounded px-3 py-2">
+            Work permitted on {workDate} ({dailySchedule[0]?.dayName}) from {startTime} to {endTime}{endTime <= startTime ? ' (next morning)' : ''}.
+          </p>
 
           <div className="grid md:grid-cols-2 gap-3 mt-5">
             <Field label="Location of Work *">
@@ -746,9 +693,6 @@ function VendorPortalView({ activePermit, setActivePermitId, openModal, assisted
             </Field>
             <Field label="Mobile Number *">
               <input required value={mobileNo} onChange={(e) => setMobileNo(e.target.value)} placeholder="+971 5X XXX XXXX" className={inputCls} />
-            </Field>
-            <Field label="Vehicle Plate (optional)">
-              <input value={vehiclePlate} onChange={(e) => setVehiclePlate(e.target.value)} placeholder="Abu Dhabi 5 - 49201" className={inputCls} />
             </Field>
           </div>
 
@@ -1018,14 +962,12 @@ function SignaturePad({ label, onChange, className = '' }) {
 // ----------------------------------------------------
 function VendorPermitStatusCard({ permit, onReset, openModal, emailNote }) {
   const [marking, setMarking] = useState(false);
-  const { done, total } = dayProgress(permit);
-  const resuming = permit.status === 'pending_checkin' && hasResumedBefore(permit);
 
   const markCompleted = async () => {
     setMarking(true);
     try {
       await vendorMarkCompleted(permit.id);
-      await logAuditEvent({ permitId: permit.id, eventType: 'vendor_marked_completed', message: `${permit.companyName} marked work completed for today on ${permit.permitRef}.`, actor: permit.contractorConfirmation?.representativeName || permit.companyName });
+      await logAuditEvent({ permitId: permit.id, eventType: 'vendor_marked_completed', message: `${permit.companyName} marked work completed on ${permit.permitRef}.`, actor: permit.contractorConfirmation?.representativeName || permit.companyName });
     } finally {
       setMarking(false);
     }
@@ -1041,14 +983,12 @@ function VendorPermitStatusCard({ permit, onReset, openModal, emailNote }) {
         <p className="text-[10px] uppercase text-gray-500 tracking-widest mt-2">Permit ID: {permit.id.slice(0, 8)}</p>
       </div>
 
-      {total > 1 && (
-        <p className="text-[11px] text-gray-500 uppercase tracking-wider mb-3">Day {done + 1} of {total} &bull; Valid {permit.startDate} to {permit.endDate}</p>
-      )}
+      <p className="text-[11px] text-gray-500 uppercase tracking-wider mb-3">Valid on {permitDateLabel(permit)} only</p>
 
       <div className={`border rounded-md py-3 px-4 mb-4 flex flex-col items-center ${statusBadgeClass(permit.status)}`}>
         <span className="flex items-center gap-1.5 font-semibold text-sm uppercase tracking-wide">
           {permit.status === 'active' ? <CheckCircle className="h-5 w-5" /> : permit.status === 'rejected' ? <ShieldAlert className="h-5 w-5" /> : <RefreshCw className="h-4 w-4 animate-spin" />}
-          {resuming ? 'Valid Permit — Ready to Resume at Gate 3' : statusLabel(permit.status)}
+          {statusLabel(permit.status)}
         </span>
       </div>
 
@@ -1077,8 +1017,8 @@ function VendorPermitStatusCard({ permit, onReset, openModal, emailNote }) {
 
       <div className="text-left bg-edition-cream/50 p-4 rounded border border-edition-gold/10 text-sm space-y-2 mb-6">
         <Row label="Location" value={permit.workLocation} />
-        <Row label="Validity" value={`${permit.startDate} to ${permit.endDate} (${permit.durationDays}d)`} />
-        <Row label="Daily Hours" value={`${permit.startTime} - ${permit.endTime}`} />
+        <Row label="Date" value={permitDateLabel(permit)} />
+        <Row label="Hours" value={`${permit.startTime} - ${permit.endTime}`} />
         <Row label="Crew Size" value={`${crewSizeOf(permit)} Person(s)`} />
         <Row label="Company" value={permit.companyName} />
         <div className="pt-1.5 text-xs text-gray-600">
@@ -1090,7 +1030,7 @@ function VendorPermitStatusCard({ permit, onReset, openModal, emailNote }) {
       {permit.status === 'active' && (
         <button onClick={markCompleted} disabled={marking}
           className="w-full flex items-center justify-center gap-1.5 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white font-bold text-xs uppercase tracking-widest py-3 rounded mb-3">
-          <ThumbsUp className="h-4 w-4" /> {marking ? 'Submitting...' : 'Mark Work Completed for Today'}
+          <ThumbsUp className="h-4 w-4" /> {marking ? 'Submitting...' : 'Mark Work Completed'}
         </button>
       )}
 
@@ -1157,22 +1097,23 @@ function SecurityGateView({ permits, onAssist }) {
           <div className="grid md:grid-cols-2 gap-4">
             {pendingCheckIn.map((permit) => {
               const hccBlocked = permit.hccApproval?.required && !permit.hccApproval?.approved;
-              const resuming = hasResumedBefore(permit);
-              const { done, total } = dayProgress(permit);
+              const validity = dateValidity(permit, nowTick);
               return (
                 <PermitGateCard key={permit.id} permit={permit}>
-                  {resuming && (
-                    <div className="bg-blue-50 border border-blue-200 text-blue-800 rounded px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider mb-2">
-                      Resuming — Day {done + 1} of {total}, already authorized
-                    </div>
-                  )}
                   {hccBlocked ? (
                     <div className="bg-red-50 border border-red-300 text-red-800 rounded p-2.5 text-[11px] font-semibold flex items-center gap-1.5">
                       <ShieldAlert className="h-4 w-4 shrink-0" /> Blocked — Awaiting HCC Manager Approval
                     </div>
+                  ) : validity !== 'ok' ? (
+                    <div className="bg-red-50 border border-red-300 text-red-800 rounded p-2.5 text-[11px] font-semibold flex items-center gap-1.5">
+                      <AlertTriangle className="h-4 w-4 shrink-0" />
+                      {validity === 'future'
+                        ? `Not valid yet — this permit is for ${permit.startDate}.`
+                        : `Expired — this permit was only valid on ${permit.startDate}. A new permit is needed.`}
+                    </div>
                   ) : (
                     <button onClick={() => doBatchCheckIn(permit)} className="w-full flex items-center justify-center gap-1.5 bg-edition-black text-white hover:bg-edition-charcoal text-[11px] uppercase tracking-widest font-semibold py-3 px-4 rounded border border-edition-gold">
-                      <UserCheck className="h-4 w-4 text-edition-gold" /> {resuming ? 'Resume Check-In' : 'Check-In All Crew'} ({crewSizeOf(permit)})
+                      <UserCheck className="h-4 w-4 text-edition-gold" /> Check-In All Crew ({crewSizeOf(permit)})
                     </button>
                   )}
                 </PermitGateCard>
@@ -1191,7 +1132,7 @@ function SecurityGateView({ permits, onAssist }) {
                 <PermitGateCard key={permit.id} permit={permit}>
                   <div className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full inline-flex items-center gap-1 mb-2 ${within ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'}`}>
                     <span className={`h-2 w-2 rounded-full ${within ? 'bg-green-500' : 'bg-amber-500'}`} />
-                    {within ? 'Within Permitted Daily Window' : 'Outside Permitted Daily Window'}
+                    {within ? 'Within Permitted Work Hours' : 'Outside Permitted Work Hours'}
                   </div>
                   <div className="space-y-1.5 mb-2">
                     {permit.workers.map((w) => (
@@ -1216,20 +1157,13 @@ function SecurityGateView({ permits, onAssist }) {
       <GateSection title="Awaiting Gate 3 Check-Out" icon={Clock} count={pendingCheckOut.length} badgeClass="bg-purple-100 border-purple-300 text-purple-800">
         {pendingCheckOut.length === 0 ? <Empty text="No crews cleared for release yet." /> : (
           <div className="grid md:grid-cols-2 gap-4">
-            {pendingCheckOut.map((permit) => {
-              const isLastDay = todayIso() >= permit.endDate;
-              const isFinal = permit.closureMode === 'series' || isLastDay;
-              return (
-                <PermitGateCard key={permit.id} permit={permit}>
-                  <div className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded mb-2 inline-block ${isFinal ? 'bg-red-50 text-red-700' : 'bg-blue-50 text-blue-700'}`}>
-                    {isFinal ? 'Final — Permit Closes on Checkout' : 'Day Closure — Permit Resumes Tomorrow'}
-                  </div>
-                  <button onClick={() => doBatchCheckOut(permit)} className="w-full flex items-center justify-center gap-1.5 bg-purple-700 hover:bg-purple-800 text-white text-[11px] uppercase tracking-widest font-semibold py-3 px-4 rounded">
-                    <UserX className="h-4 w-4" /> {isFinal ? 'Check-Out, Return IDs & Close Permit' : 'Check-Out & Return IDs for Today'} ({crewSizeOf(permit)})
-                  </button>
-                </PermitGateCard>
-              );
-            })}
+            {pendingCheckOut.map((permit) => (
+              <PermitGateCard key={permit.id} permit={permit}>
+                <button onClick={() => doBatchCheckOut(permit)} className="w-full flex items-center justify-center gap-1.5 bg-purple-700 hover:bg-purple-800 text-white text-[11px] uppercase tracking-widest font-semibold py-3 px-4 rounded">
+                  <UserX className="h-4 w-4" /> Check-Out, Return IDs & Close Permit ({crewSizeOf(permit)})
+                </button>
+              </PermitGateCard>
+            ))}
           </div>
         )}
       </GateSection>
@@ -1269,7 +1203,7 @@ function PermitGateCard({ permit, children }) {
       </div>
       <div className="bg-edition-cream/60 rounded p-2 text-xs space-y-1 my-3 border border-edition-gold/10">
         <div><span className="text-gray-500 uppercase text-[9px]">Crew:</span> <span className="font-bold">{crewSizeOf(permit)} Workers</span></div>
-        <div><span className="text-gray-500 uppercase text-[9px]">Daily Hours:</span> <span className="font-mono font-semibold">{permit.startTime} - {permit.endTime}</span></div>
+        <div><span className="text-gray-500 uppercase text-[9px]">Date:</span> <span className="font-semibold">{permitDateLabel(permit)}</span> <span className="text-gray-500 uppercase text-[9px] ml-2">Hours:</span> <span className="font-mono font-semibold">{permit.startTime} - {permit.endTime}</span></div>
         <div className="italic text-gray-600 line-clamp-1">{permit.descriptionOfWork}</div>
       </div>
       {children}
@@ -1323,7 +1257,7 @@ function SupervisorHubView({ permits, openModal, onAssist }) {
         <h3 className="text-sm font-bold uppercase text-edition-black tracking-widest mb-3 border-b border-edition-gold/10 pb-1.5">
           Awaiting Completion Acknowledgment ({pendingAck.length})
         </h3>
-        <p className="text-[11px] text-gray-500 -mt-2 mb-3">The vendor has marked work completed for today. Acknowledge and choose whether this closes the permit for the day or for good.</p>
+        <p className="text-[11px] text-gray-500 -mt-2 mb-3">The vendor has marked the work completed. Acknowledge it so Security can check the crew out.</p>
         {pendingAck.length === 0 ? <Empty text="No completions awaiting acknowledgment." /> : (
           <div className="grid md:grid-cols-2 gap-4">
             {pendingAck.map((permit) => (
@@ -1366,42 +1300,31 @@ function SupervisorHubView({ permits, openModal, onAssist }) {
 function CompletionAckModal({ permit, onClose }) {
   const [ackBy, setAckBy] = useState('');
   const [notes, setNotes] = useState('');
-  const isLastDay = todayIso() >= permit.endDate;
-  const { done, total } = dayProgress(permit);
 
-  const choose = async (closureMode) => {
+  const confirm = async () => {
     if (!ackBy) { alert('Enter the acknowledging engineer\'s name.'); return; }
-    await acknowledgeCompletion(permit.id, closureMode, ackBy, notes);
+    await acknowledgeCompletion(permit.id, ackBy, notes);
     await logAuditEvent({
       permitId: permit.id,
       eventType: 'completion_acknowledged',
-      message: `Engineering acknowledged completion for ${permit.permitRef} — ${closureMode === 'series' ? 'closing the series (final)' : 'closing the day, permit remains valid'}.`,
+      message: `Engineering acknowledged completion for ${permit.permitRef}. Permit closes when Security checks the crew out.`,
       actor: ackBy,
     });
     onClose();
   };
 
   return (
-    <ModalShell title="Acknowledge Work Completion" subtitle={`Permit ${permit.permitRef} — ${permit.companyName} — Day ${done + 1} of ${total}`} onClose={onClose}>
+    <ModalShell title="Acknowledge Work Completion" subtitle={`Permit ${permit.permitRef} — ${permit.companyName}`} onClose={onClose}>
+      <p className="text-xs text-gray-600 mb-4">The vendor says the work is finished. After you acknowledge, Security checks the crew out, returns their IDs and closes the permit.</p>
       <Field label="Acknowledged By *">
         <input value={ackBy} onChange={(e) => setAckBy(e.target.value)} className={inputCls} placeholder="Engineering supervisor name" />
       </Field>
       <Field label="Notes (optional)" className="mt-3">
         <textarea rows="2" value={notes} onChange={(e) => setNotes(e.target.value)} className={inputCls} placeholder="Area inspected and left safe, etc." />
       </Field>
-
-      <div className="grid grid-cols-1 gap-3 mt-5">
-        <button onClick={() => choose('day')} disabled={isLastDay}
-          className="w-full text-left bg-blue-50 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed border border-blue-300 text-blue-900 rounded p-3">
-          <span className="block text-xs font-bold uppercase tracking-wider">Close the Day</span>
-          <span className="block text-[11px] mt-0.5">Permit stays valid through {permit.endDate}. Security can resume check-in tomorrow with no new approval.{isLastDay ? ' (Unavailable — today is the last scheduled day.)' : ''}</span>
-        </button>
-        <button onClick={() => choose('series')}
-          className="w-full text-left bg-red-50 hover:bg-red-100 border border-red-300 text-red-900 rounded p-3">
-          <span className="block text-xs font-bold uppercase tracking-wider">Close the Series (Final)</span>
-          <span className="block text-[11px] mt-0.5">The permit ends for good once Security checks the crew out.</span>
-        </button>
-      </div>
+      <button onClick={confirm} className="w-full mt-5 flex items-center justify-center gap-1.5 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs uppercase tracking-widest py-3 rounded">
+        <ThumbsUp className="h-4 w-4" /> Acknowledge &amp; Send to Gate 3
+      </button>
     </ModalShell>
   );
 }
@@ -1455,8 +1378,8 @@ function SupervisorSection8Modal({ permit, onClose }) {
       <div className="bg-edition-cream/50 rounded p-3 text-xs space-y-1 mb-4 border border-edition-gold/10">
         <Row label="Location" value={permit.workLocation} />
         <Row label="Crew Size" value={`${crewSizeOf(permit)} Workers`} />
-        <Row label="Validity" value={`${permit.startDate} to ${permit.endDate}`} />
-        <Row label="Daily Hours" value={`${permit.startTime} - ${permit.endTime}`} />
+        <Row label="Date" value={permitDateLabel(permit)} />
+        <Row label="Hours" value={`${permit.startTime} - ${permit.endTime}`} />
       </div>
 
       {isHighRisk && (
@@ -1563,36 +1486,32 @@ function AdminDashboardView({ permits, auditLogs, totalOnSiteHeadcount, openModa
   const [section10Permit, setSection10Permit] = useState(null);
 
   const windowDef = WINDOWS.find((w) => w.id === windowId);
-  const cutoff = windowDef.days ? new Date(Date.now() - (windowDef.days - 1) * 86400000) : null;
-  const cutoffIso = cutoff ? cutoff.toISOString().split('T')[0] : null;
+  const cutoffIso = windowDef.days ? addDaysIso(todayIso(), -(windowDef.days - 1)) : null;
 
-  const daysInWindow = (permit) => {
-    if (!windowDef.days) return permit.dailySchedule?.length || permit.durationDays || 1;
-    return (permit.dailySchedule || []).filter((d) => d.date >= cutoffIso).length;
-  };
+  // Every permit is a single day; count it once its date has arrived and falls in the window.
+  const inWindow = (permit) => permit.startDate <= todayIso() && (!cutoffIso || permit.startDate >= cutoffIso);
 
   const zoneStats = useMemo(() => {
     const byZone = {};
     HOTEL_LOCATIONS.forEach((l) => { byZone[l.name] = { zone: l.name, riskLevel: l.riskLevel, permitsIssued: 0, workers: 0, manHours: 0 }; });
     permits.forEach((p) => {
       const zone = byZone[p.workLocation] || (byZone[p.workLocation] = { zone: p.workLocation, riskLevel: p.riskLevel, permitsIssued: 0, workers: 0, manHours: 0 });
-      const days = daysInWindow(p);
-      if (days <= 0) return;
+      if (!inWindow(p)) return;
       zone.permitsIssued += 1;
       zone.workers += crewSizeOf(p);
-      zone.manHours += crewSizeOf(p) * days * hoursBetween(p.startTime, p.endTime);
+      zone.manHours += crewSizeOf(p) * hoursBetween(p.startTime, p.endTime);
     });
     return Object.values(byZone).filter((z) => z.permitsIssued > 0).sort((a, b) => b.manHours - a.manHours);
   }, [permits, windowId]);
 
   const maxManHours = Math.max(1, ...zoneStats.map((z) => z.manHours));
 
-  const durationDistribution = useMemo(() => {
-    const dist = {};
-    permits.forEach((p) => { dist[p.durationDays] = (dist[p.durationDays] || 0) + 1; });
-    return Object.entries(dist).map(([days, count]) => ({ days: Number(days), count })).sort((a, b) => a.days - b.days);
-  }, [permits]);
-  const maxDistCount = Math.max(1, ...durationDistribution.map((d) => d.count));
+  const permitsByDay = useMemo(() => {
+    const byDate = {};
+    permits.forEach((p) => { if (inWindow(p)) byDate[p.startDate] = (byDate[p.startDate] || 0) + 1; });
+    return Object.entries(byDate).map(([date, count]) => ({ date, count })).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 7);
+  }, [permits, windowId]);
+  const maxDayCount = Math.max(1, ...permitsByDay.map((d) => d.count));
 
   const leaderboard = useMemo(() => {
     const byCompany = {};
@@ -1600,7 +1519,7 @@ function AdminDashboardView({ permits, auditLogs, totalOnSiteHeadcount, openModa
       const c = byCompany[p.companyName] || (byCompany[p.companyName] = { company: p.companyName, permits: 0, headcount: 0, manHours: 0 });
       c.permits += 1;
       c.headcount += crewSizeOf(p);
-      c.manHours += crewSizeOf(p) * (p.dailySchedule?.length || p.durationDays || 1) * hoursBetween(p.startTime, p.endTime);
+      c.manHours += crewSizeOf(p) * hoursBetween(p.startTime, p.endTime);
     });
     return Object.values(byCompany).sort((a, b) => b.manHours - a.manHours).slice(0, 8);
   }, [permits]);
@@ -1676,12 +1595,12 @@ function AdminDashboardView({ permits, auditLogs, totalOnSiteHeadcount, openModa
           </div>
 
           <div>
-            <h3 className="text-xs font-bold uppercase tracking-widest text-edition-black mb-2">Permit Duration Distribution</h3>
+            <h3 className="text-xs font-bold uppercase tracking-widest text-edition-black mb-2">Permits Per Day ({windowDef.label})</h3>
             <div className="space-y-1.5">
-              {durationDistribution.map((d) => (
-                <div key={d.days} className="flex items-center gap-2 text-xs">
-                  <span className="w-12 font-semibold shrink-0">{d.days}d</span>
-                  <div className="flex-grow bg-gray-100 h-4 rounded overflow-hidden"><div className="bg-edition-darkGold h-full" style={{ width: `${(d.count / maxDistCount) * 100}%` }} /></div>
+              {permitsByDay.length === 0 ? <p className="text-xs text-gray-400 italic">No permits in this window.</p> : permitsByDay.map((d) => (
+                <div key={d.date} className="flex items-center gap-2 text-xs">
+                  <span className="w-24 font-semibold shrink-0 font-mono">{d.date}</span>
+                  <div className="flex-grow bg-gray-100 h-4 rounded overflow-hidden"><div className="bg-edition-darkGold h-full" style={{ width: `${(d.count / maxDayCount) * 100}%` }} /></div>
                   <span className="w-6 text-right shrink-0 font-bold">{d.count}</span>
                 </div>
               ))}
@@ -1711,7 +1630,7 @@ function AdminDashboardView({ permits, auditLogs, totalOnSiteHeadcount, openModa
               <tr>
                 <th className="px-4 py-3 font-semibold">Ref</th>
                 <th className="px-4 py-3 font-semibold">Company &amp; Location</th>
-                <th className="px-4 py-3 font-semibold">Validity</th>
+                <th className="px-4 py-3 font-semibold">Date</th>
                 <th className="px-4 py-3 font-semibold">Crew</th>
                 <th className="px-4 py-3 font-semibold">Status</th>
                 <th className="px-4 py-3 font-semibold text-right">Actions</th>
@@ -1724,7 +1643,7 @@ function AdminDashboardView({ permits, auditLogs, totalOnSiteHeadcount, openModa
                 <tr key={p.id} className="hover:bg-edition-cream/30">
                   <td className="px-4 py-3 font-bold">{p.permitRef}</td>
                   <td className="px-4 py-3"><div className="font-semibold">{p.companyName}</div><div className="text-[11px] text-gray-500">{p.workLocation}</div></td>
-                  <td className="px-4 py-3 text-xs">{p.startDate} → {p.endDate}</td>
+                  <td className="px-4 py-3 text-xs">{permitDateLabel(p)}</td>
                   <td className="px-4 py-3 text-xs font-bold">{crewSizeOf(p)}</td>
                   <td className="px-4 py-3"><span className={`border px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase ${statusBadgeClass(p.status)}`}>{statusLabel(p.status)}</span></td>
                   <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
@@ -1782,8 +1701,8 @@ function Form11OfficialDocumentModal({ permit, onClose }) {
           <DocRow label="Company" value={permit.companyName} />
           <DocRow label="Mobile" value={permit.mobileNo} />
           <DocRow label="Location" value={permit.workLocation} />
-          <DocRow label="Validity" value={`${permit.startDate} to ${permit.endDate} (${permit.durationDays} days)`} />
-          <DocRow label="Daily Hours" value={`${permit.startTime} - ${permit.endTime}`} />
+          <DocRow label="Date (valid for one day only)" value={permitDateLabel(permit)} />
+          <DocRow label="Hours" value={`${permit.startTime} - ${permit.endTime}`} />
           <DocRow label="Risk Level" value={permit.riskLevel} />
           <DocRow label="Description" value={permit.descriptionOfWork} />
         </DocSection>
